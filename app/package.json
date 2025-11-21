@@ -1,0 +1,48 @@
+{
+  "name": "app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc -b --noEmit",
+    "lint": "eslint . --fix",
+    "format": "prettier --write \"src/**/*.{js,ts,vue,json,css,md}\"",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@account-kit/core": "^4.79.0",
+    "@account-kit/infra": "^4.79.0",
+    "@account-kit/react": "^4.79.0",
+    "@alchemy/aa-core": "^3.19.0",
+    "@auth0/auth0-vue": "^2.4.0",
+    "@tanstack/react-query": "^5.90.10",
+    "viem": "^2.39.3",
+    "vue": "^3.5.24",
+    "vue-router": "^4.6.3",
+    "wagmi": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@typescript-eslint/eslint-plugin": "^8.47.0",
+    "@typescript-eslint/parser": "^8.47.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vitest/ui": "^4.0.12",
+    "@vue/test-utils": "^2.4.6",
+    "@vue/tsconfig": "^0.8.1",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.5.1",
+    "happy-dom": "^20.0.10",
+    "prettier": "^3.6.2",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4",
+    "vitest": "^4.0.12",
+    "vue-eslint-parser": "^10.2.0",
+    "vue-tsc": "^3.1.4"
+  }
+}
