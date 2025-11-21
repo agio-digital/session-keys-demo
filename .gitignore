@@ -27,6 +27,7 @@ yarn-error.log*
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+.vscode/settings.json
 .idea
 .DS_Store
 *.suo
@@ -34,6 +35,9 @@ yarn-error.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code
+.claude/settings.local.json
 
 # Yarn
 .yarn/*
