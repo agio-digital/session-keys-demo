@@ -1,5 +1,5 @@
-import { createRouter, createWebHistory } from "vue-router";
-import { authGuard } from "@auth0/auth0-vue";
+import { createRouter, createWebHashHistory } from "vue-router";
+import { useAlchemySigner } from "../composables/useAlchemySigner";
 
 const routes = [
   {
@@ -11,12 +11,18 @@ const routes = [
     path: "/wallet",
     name: "wallet",
     component: () => import("../views/Wallet.vue"),
-    beforeEnter: authGuard,
+    beforeEnter: () => {
+      const { isAuthenticated } = useAlchemySigner();
+      if (!isAuthenticated.value) {
+        return { name: "login" };
+      }
+      return true;
+    },
   },
 ];
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHashHistory(),
   routes,
 });
 

@@ -1,64 +1,12 @@
 <script setup lang="ts">
-import { useAuth0 } from "@auth0/auth0-vue";
+import { useAlchemySigner } from "./composables/useAlchemySigner";
 
-const { isLoading } = useAuth0();
+const { isInitializing } = useAlchemySigner();
 </script>
 
 <template>
-  <div v-if="isLoading" class="loading-container">
-    <div class="loader"></div>
+  <main v-if="isInitializing" class="container" aria-busy="true">
     <p>Loading...</p>
-  </div>
+  </main>
   <router-view v-else />
 </template>
-
-<style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-body {
-  font-family:
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-.loading-container {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-}
-
-.loader {
-  width: 50px;
-  height: 50px;
-  border: 4px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.loading-container p {
-  margin-top: 1rem;
-  font-size: 1.2rem;
-  font-weight: 500;
-}
-</style>

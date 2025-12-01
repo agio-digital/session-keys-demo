@@ -6,11 +6,17 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run"
   },
   "dependencies": {
+    "@aa-sdk/core": "^4.79.0",
+    "@account-kit/infra": "^4.79.0",
+    "@account-kit/signer": "^4.79.0",
+    "@account-kit/smart-contracts": "^4.79.0",
+    "@account-kit/wallet-client": "^4.79.0",
     "@alchemy/aa-accounts": "^3.19.0",
     "@alchemy/aa-alchemy": "^3.19.0",
     "@alchemy/aa-core": "^3.19.0",
@@ -18,13 +24,18 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "pino": "^10.1.0",
+    "pino-pretty": "^13.1.2",
     "viem": "^2.38.6"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.47.0",
+    "@typescript-eslint/parser": "^8.47.0",
     "@vitest/ui": "^4.0.12",
+    "eslint": "^9.39.1",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.12"

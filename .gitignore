@@ -10,6 +10,13 @@ coverage/
 dist/
 build/
 
+# SSL Certificates
+app/certs/
+server/certs/
+
+# Session data (contains private keys)
+server/data/
+
 # Environment variables
 .env
 .env.local

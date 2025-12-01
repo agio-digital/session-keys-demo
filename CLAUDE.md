@@ -9,8 +9,8 @@ Full-stack Alchemy session keys demo implementing delegated transaction signing 
 ## Monorepo Structure
 
 Yarn workspaces with two packages:
-- **app/** - Vue 3 frontend (Vite, TypeScript, port 8080)
-- **server/** - Express backend (TypeScript, tsx, port 3001)
+- **app/** - Vue 3 frontend (Vite, TypeScript, HTTPS on port 8080)
+- **server/** - Express backend (TypeScript, tsx, HTTPS on port 3001)
 
 ## Development Commands
 
@@ -60,8 +60,10 @@ yarn workspace server test:ui   # Run server tests with UI
 Required environment variables:
 - `VITE_AUTH0_DOMAIN` - Auth0 domain for authentication
 - `VITE_AUTH0_CLIENT_ID` - Auth0 client ID
-- `VITE_API_URL` - Backend API URL (default: http://localhost:3001)
+- `VITE_API_URL` - Backend API URL (default: https://localhost:3001)
 - `VITE_ALCHEMY_API_KEY` - Alchemy API key for smart account operations
+
+**Note**: Both frontend and backend run on HTTPS for Auth0 compatibility and security. SSL certificates are auto-generated on first run using openssl. Browser will show certificate warnings for local development - accept them to proceed.
 
 ### server/.env
 Required environment variables:
@@ -88,9 +90,10 @@ Copy `.env.example` files in both directories to get started.
    - Executes transactions on Sepolia testnet respecting permission boundaries
 
 3. **Key Security Properties**
-   - Main private key: stays on client, never transmitted
-   - Session keys: ephemeral, scoped permissions (spending limits, time windows)
-   - Backend stores session keys (WARNING: in-memory only, use KMS in production)
+   - Main private key: stored in browser localStorage, NEVER transmitted to server
+   - Session keys: ephemeral, scoped permissions (spending limits, time windows), sent to server for delegated signing
+   - Backend stores session keys in filesystem (WARNING: production should use KMS + database)
+   - Backend only stores account addresses for wallet tracking, never main private keys
    - Sessions can be revoked instantly via DELETE `/api/session/:userId`
 
 ### Frontend Architecture
@@ -125,6 +128,32 @@ Copy `.env.example` files in both directories to get started.
 ### Network Configuration
 
 Demo runs on **Sepolia testnet**. All Alchemy clients configured with `sepolia` chain from `viem/chains`.
+
+### Gas Sponsorship Configuration
+
+**Alchemy Gas Manager** is configured to sponsor all transaction fees - users never need to fund their accounts!
+
+Configuration in both client and server:
+```typescript
+const client = await createModularAccountAlchemyClient({
+  transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
+  chain: sepolia,
+  signer,
+  policyId: ALCHEMY_GAS_POLICY_ID, // Gas Manager Policy ID
+});
+```
+
+**Environment Variables Required:**
+- `ALCHEMY_GAS_POLICY_ID` / `VITE_ALCHEMY_GAS_POLICY_ID` - Gas Manager Policy ID from Alchemy Dashboard
+- `ALCHEMY_APP_ID` / `VITE_ALCHEMY_APP_ID` - Alchemy App ID for tracking
+
+**How it works:**
+1. **Create Wallet**: Generates a counterfactual address (no deployment, no funding needed)
+2. **Create Session**: Session keys created and stored server-side
+3. **First Transaction**: Account automatically deploys on-chain with gas sponsored by Alchemy
+4. **Subsequent Transactions**: All gas fees sponsored by the Gas Manager Policy
+
+No manual funding required - Alchemy sponsors all gas fees within policy limits.
 
 ## Important Implementation Details
 

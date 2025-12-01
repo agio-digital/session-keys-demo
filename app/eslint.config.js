@@ -26,6 +26,14 @@ export default [
       ...prettierConfig.rules,
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
       "vue/multi-word-component-names": "off",
+      "no-console": "error",
+      "quotes": ["error", "double", { "avoidEscape": true }],
+    },
+  },
+  {
+    files: ["src/utils/logger.ts"],
+    rules: {
+      "no-console": "off",
     },
   },
 ];
