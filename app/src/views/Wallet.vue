@@ -1,17 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
-import { useRouter } from "vue-router";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { useAuth0 } from "@auth0/auth0-vue";
 import { createSmartWalletClient } from "@account-kit/wallet-client";
 import { sepolia, alchemy } from "@account-kit/infra";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { parseEther, toHex } from "viem";
 import { logger } from "../utils/logger";
+import { until } from "../utils/until";
 import { useWalletData } from "../composables/useWalletData";
 import { useSessionData } from "../composables/useSessionData";
 import { useAlchemySigner } from "../composables/useAlchemySigner";
+import { getWalletFromServer } from "../api/wallet";
+import router from "@/router";
+import { delay } from "@/utils/delay";
 
-const router = useRouter();
-const { user, isAuthenticated, logout: alchemyLogout, signer: getAlchemySigner } = useAlchemySigner();
+const { logout: auth0Logout, isLoading, isAuthenticated } = useAuth0();
+const {
+  user,
+  isAuthenticated: isAlchemyAuthenticated,
+  isInitializing,
+  error: alchemyError,
+  initializeSigner,
+  loginWithAuth0: loginAlchemyWithAuth0,
+  logout: alchemyLogout,
+  signer: getAlchemySigner,
+} = useAlchemySigner();
 
 const ALCHEMY_API_KEY = import.meta.env.VITE_ALCHEMY_API_KEY;
 const ALCHEMY_GAS_POLICY_ID = import.meta.env.VITE_ALCHEMY_GAS_POLICY_ID;
@@ -24,67 +37,135 @@ if (!ALCHEMY_GAS_POLICY_ID) {
   throw new Error("VITE_ALCHEMY_GAS_POLICY_ID is required in environment variables");
 }
 
-// Use Alchemy user ID (orgId + address combination)
-const userId = computed(() => user.value?.userId || user.value?.address || "");
+const mounting = ref(true);
 
-// Redirect to login if not authenticated
-watch(
-  () => isAuthenticated.value,
-  (authenticated) => {
-    if (!authenticated) {
-      router.push("/");
+// Initialize Alchemy signer on mount and auto-connect if not authenticated
+onMounted(async () => {
+  // Wait for Auth0 to finish loading first
+  await router.isReady();
+  await until(() => isLoading.value === false && isInitializing.value === false);
+  try {
+    await initializeSigner();
+    await delay(300);
+
+    logger.info(
+      {
+        isAuth0Authenticated: isAuthenticated.value,
+        isAlchemyAuthenticated: isAlchemyAuthenticated.value,
+      },
+      "Initializing Alchemy signer..."
+    );
+
+    if (!isAuthenticated.value) {
+      logger.info("[Wallet] Not Auth0 authenticated");
+      return;
     }
-  },
-  { immediate: true }
-);
 
-// Pinia Colada auto-fetches and caches with reactive keys
-const { wallet, saveWallet: saveWalletMutation } = useWalletData(userId.value);
+    // If Alchemy authenticated, sync wallet to server if needed
+    if (isAlchemyAuthenticated.value) {
+      logger.info("[Wallet] Alchemy authenticated, checking wallet sync");
+      await syncWalletToServer();
+    } else {
+      // Don't auto-redirect - let user click "Connect Wallet" button
+      logger.info("[Wallet] Alchemy not authenticated, waiting for user to connect");
+    }
+  } catch (err) {
+    logger.error({ err }, "[Wallet] Failed to initialize signer");
+  } finally {
+    mounting.value = false;
+  }
+});
+
+// Use Alchemy user ID for localStorage caching only
+const alchemyUserId = computed(() => user.value?.userId || user.value?.address || "");
+
+// Pinia Colada auto-fetches and caches (userId determined from JWT on server)
+// Queries only run when alchemyUserId/isAlchemyAuthenticated have values
+const { wallet, saveWallet: saveWalletMutation } = useWalletData(alchemyUserId);
 const {
   session,
   isSessionActive,
   createSession: createSessionMutation,
   revokeSession: revokeSessionMutation,
   sendTransaction: sendTransactionMutation,
-} = useSessionData(userId.value);
+} = useSessionData(isAlchemyAuthenticated);
 
 // Local UI state
 const loading = ref(false);
 const status = ref("");
 const txHash = ref("");
-const recipientAddress = ref(localStorage.getItem("recipientAddress") || "0x0000000000000000000000000000000000000000");
+const recipientAddress = ref(
+  localStorage.getItem("recipientAddress") || "0x0000000000000000000000000000000000000000"
+);
 const amount = ref("0.00001");
+const txMethod = ref<"session" | "direct">("session");
+const isConnectingWallet = ref(false);
 
 // Persist recipient address
 watch(recipientAddress, (val) => localStorage.setItem("recipientAddress", val));
+
+// Sync local wallet to server if it exists locally but not on server
+async function syncWalletToServer() {
+  const localCacheKey = alchemyUserId.value;
+  if (!localCacheKey) return;
+
+  const localData = localStorage.getItem(`wallet_${localCacheKey}`);
+  if (!localData) return;
+
+  const localWallet = JSON.parse(localData);
+  const serverWallet = await getWalletFromServer();
+
+  if (localWallet.accountAddress && !serverWallet) {
+    logger.info({ accountAddress: localWallet.accountAddress }, "[Wallet] Syncing local wallet to server");
+    status.value = "Syncing wallet to server...";
+    try {
+      await saveWalletMutation({ accountAddress: localWallet.accountAddress });
+      status.value = "Wallet synced to server";
+      logger.info("[Wallet] Wallet synced to server successfully");
+    } catch (err: any) {
+      logger.error({ err }, "[Wallet] Failed to sync wallet to server");
+      status.value = `Failed to sync wallet: ${err.message}`;
+    }
+  }
+}
 
 // Computed from Pinia Colada queries
 const accountAddress = computed(() => wallet.value?.accountAddress || "");
 const hasWallet = computed(() => !!wallet.value);
 
 // Validate data consistency: if session exists but no wallet, revoke the session
+// Only run after initial mount completes to avoid race with async queries
+watch([session, wallet, mounting], ([sessionData, walletData, isMounting]) => {
+  // Don't check during initial mount - wait for queries to complete
+  if (isMounting) return;
+
+  if (sessionData && !walletData) {
+    logger.warn("Inconsistent state: session exists but no wallet found. Revoking session.");
+    revokeSessionMutation();
+    status.value = "Session revoked: wallet data missing. Please create a new wallet.";
+  }
+});
+
+// Check if account is deployed and fetch balance when account address is available
 watch(
-  [session, wallet],
-  ([sessionData, walletData]) => {
-    if (sessionData && !walletData) {
-      logger.warn("Inconsistent state: session exists but no wallet found. Revoking session.");
-      revokeSessionMutation();
-      status.value = "Session revoked: wallet data missing. Please create a new wallet.";
+  () => accountAddress.value,
+  async (address) => {
+    if (address) {
+      await Promise.all([checkAccountDeployed(), fetchAccountBalance()]);
     }
   },
   { immediate: true }
 );
 
-// Check if account is deployed when account address is available
-watch(
-  () => accountAddress.value,
-  async (address) => {
-    if (address) {
-      await checkAccountDeployed();
-    }
-  },
-  { immediate: true }
-);
+async function connectAlchemyWallet() {
+  isConnectingWallet.value = true;
+  try {
+    await loginAlchemyWithAuth0({ mode: "redirect" });
+  } catch (err: any) {
+    status.value = `Wallet connection error: ${err.message}`;
+    isConnectingWallet.value = false;
+  }
+}
 
 async function createWallet() {
   if (hasWallet.value) {
@@ -94,7 +175,7 @@ async function createWallet() {
 
   const alchemySigner = getAlchemySigner();
   if (!alchemySigner) {
-    status.value = "Please login first";
+    status.value = "Please connect your wallet first";
     return;
   }
 
@@ -115,11 +196,12 @@ async function createWallet() {
     const account = await client.requestAccount();
     const address = account.address;
 
-    // Save wallet data (no private key needed - Alchemy manages it)
+    // Save wallet data to server (required for session key transactions)
+    status.value = "Saving wallet to server...";
     await saveWalletMutation({ accountAddress: address });
 
     status.value = `Wallet created: ${address}`;
-    logger.info({ accountAddress: address }, "Wallet created");
+    logger.info({ accountAddress: address }, "Wallet created and saved to server");
   } catch (error: any) {
     logger.error({ error }, "Wallet creation error");
     status.value = `Error: ${error.message}`;
@@ -130,6 +212,7 @@ async function createWallet() {
 
 // Check if account is deployed on-chain
 const isAccountDeployed = ref(false);
+const accountBalance = ref<string | null>(null);
 
 async function checkAccountDeployed() {
   if (!accountAddress.value) return false;
@@ -153,6 +236,35 @@ async function checkAccountDeployed() {
   } catch (error) {
     logger.error({ error }, "Failed to check account deployment");
     return false;
+  }
+}
+
+async function fetchAccountBalance() {
+  if (!accountAddress.value) {
+    accountBalance.value = null;
+    return;
+  }
+
+  try {
+    const response = await fetch(`https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_getBalance",
+        params: [accountAddress.value, "latest"],
+      }),
+    });
+    const data = await response.json();
+    if (data.result) {
+      // Convert hex wei to ETH with 6 decimal places
+      const wei = BigInt(data.result);
+      const eth = Number(wei) / 1e18;
+      accountBalance.value = eth.toFixed(6);
+    }
+  } catch (error) {
+    logger.error({ error }, "Failed to fetch account balance");
   }
 }
 
@@ -248,11 +360,13 @@ async function sendDirectTransaction() {
     // Prepare, sign, and send
     const preparedCalls = await client.prepareCalls({
       from: account.address,
-      calls: [{
-        to: recipientAddress.value as `0x${string}`,
-        value: valueHex,
-        data: "0x" as `0x${string}`,
-      }],
+      calls: [
+        {
+          to: recipientAddress.value as `0x${string}`,
+          value: valueHex,
+          data: "0x" as `0x${string}`,
+        },
+      ],
       capabilities: {
         paymasterService: { policyId: ALCHEMY_GAS_POLICY_ID },
       },
@@ -279,7 +393,7 @@ async function sendDirectTransaction() {
   }
 }
 
-async function sendTransaction() {
+async function sendSessionTransaction() {
   if (!isSessionActive.value) {
     status.value = "Please create a session first";
     return;
@@ -307,6 +421,14 @@ async function sendTransaction() {
   }
 }
 
+async function handleSendTransaction() {
+  if (txMethod.value === "session") {
+    await sendSessionTransaction();
+  } else {
+    await sendDirectTransaction();
+  }
+}
+
 async function revokeSession() {
   if (!isSessionActive.value) {
     return;
@@ -328,14 +450,14 @@ async function revokeSession() {
 }
 
 async function resetWallet() {
-  if (!userId.value) return;
+  if (!alchemyUserId.value) return;
 
   try {
     loading.value = true;
     status.value = "Resetting wallet...";
 
     // Clear local storage for this user
-    localStorage.removeItem(`wallet_${userId.value}`);
+    localStorage.removeItem(`wallet_${alchemyUserId.value}`);
 
     // Also revoke any existing session
     if (session.value) {
@@ -354,18 +476,77 @@ async function resetWallet() {
 
 const handleLogout = async () => {
   await alchemyLogout();
-  router.push("/");
+  await auth0Logout({ logoutParams: { returnTo: window.location.origin } });
 };
+
+const timeoutRef = ref<ReturnType<typeof setTimeout> | null>(null);
+
+const unload = () => {
+  mounting.value = true;
+  timeoutRef.value = setTimeout(() => {
+    mounting.value = false;
+  }, 3000);
+};
+
+onMounted(() => {
+  window.addEventListener("beforeunload", unload);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("beforeunload", unload);
+  clearTimeout(timeoutRef.value!);
+});
 </script>
 
 <template>
-  <main class="container">
+  <main v-if="mounting" class="container">
+    <p aria-busy="true">Loading...</p>
+  </main>
+  <main v-else-if="isInitializing" class="container">
+    <p aria-busy="true">Initializing wallet...</p>
+  </main>
+
+  <!-- Error state: Auth0 logged in but Alchemy not connected -->
+  <main v-else-if="!isAlchemyAuthenticated" class="container">
     <nav>
       <ul>
         <li><strong>Agio Smart Wallet</strong></li>
       </ul>
       <ul>
-        <li><small>{{ user?.email || user?.name }}</small></li>
+        <li><a href="#/home">Home</a></li>
+        <li><a href="#/wallet">Wallet</a></li>
+        <li><button class="secondary outline" @click="handleLogout">Logout</button></li>
+      </ul>
+    </nav>
+
+    <article style="text-align: center">
+      <h2>Wallet Connection Required</h2>
+      <p>You need to connect your Alchemy wallet to access this page.</p>
+      <button
+        @click="connectAlchemyWallet"
+        :aria-busy="isConnectingWallet"
+        :disabled="isConnectingWallet"
+      >
+        {{ isConnectingWallet ? "Connecting..." : "Connect Wallet" }}
+      </button>
+      <p v-if="alchemyError" role="alert" style="color: var(--pico-color-red-500); margin-top: 1rem">
+        {{ alchemyError }}
+      </p>
+      <p v-else-if="status" role="alert" style="color: var(--pico-color-red-500); margin-top: 1rem">
+        {{ status }}
+      </p>
+    </article>
+  </main>
+
+  <!-- Main wallet UI when fully authenticated -->
+  <main v-else class="container">
+    <nav>
+      <ul>
+        <li><strong>Agio Smart Wallet</strong></li>
+      </ul>
+      <ul>
+        <li><a href="#/home">Home</a></li>
+        <li><a href="#/wallet">Wallet</a></li>
         <li><button class="secondary outline" @click="handleLogout">Logout</button></li>
       </ul>
     </nav>
@@ -377,14 +558,16 @@ const handleLogout = async () => {
           {{ accountAddress ? "Wallet Created" : "Create Wallet" }}
         </button>
         <button v-if="hasWallet" @click="resetWallet" :disabled="loading" class="secondary">
-          Reset
+          Clear &amp; Revoke
         </button>
       </div>
       <p v-if="accountAddress">
-        <small><strong>Account:</strong> <code>{{ accountAddress }}</code></small>
-        <br />
-        <mark v-if="isAccountDeployed">Deployed</mark>
-        <ins v-else>Counterfactual (deploys on first tx)</ins>
+        <small
+          ><strong>Wallet:</strong> <code>{{ accountAddress }}</code>
+          &nbsp;
+          <mark v-if="isAccountDeployed">Deployed</mark>
+          <ins v-else>Counterfactual</ins></small
+        >
       </p>
     </article>
 
@@ -394,31 +577,60 @@ const handleLogout = async () => {
         <button @click="createSession" :disabled="loading || !accountAddress || isSessionActive">
           {{ isSessionActive ? "Active" : "Create" }}
         </button>
-        <button @click="revokeSession" :disabled="loading || !isSessionActive" class="pico-background-red-500">
+        <button
+          @click="revokeSession"
+          :disabled="loading || !isSessionActive"
+          class="secondary"
+        >
           Revoke
         </button>
       </div>
       <p v-if="session?.sessionId">
-        <small><code>{{ session.sessionId }}</code></small>
+        <small
+          ><strong>Session:</strong> <code>{{ session.sessionId }}</code>
+          &nbsp;
+          <mark v-if="isSessionActive">Active</mark>
+          <ins v-else>Expired</ins></small
+        >
       </p>
     </article>
 
     <article>
       <h3>3. Send Transaction</h3>
-      <label>To Address
+      <label
+        >To Address
         <input v-model="recipientAddress" type="text" placeholder="0x..." />
       </label>
-      <label>Amount (ETH)
+      <label
+        >Amount (ETH)
         <input v-model="amount" type="text" placeholder="0.00001" />
+        <small v-if="accountBalance !== null" style="cursor: pointer" @click="amount = accountBalance"
+          >Balance: {{ accountBalance }} ETH</small
+        >
       </label>
-      <div role="group">
-        <button @click="sendTransaction" :disabled="loading || !isSessionActive">
+      <fieldset>
+        <legend>Signing Method</legend>
+        <label>
+          <input
+            type="radio"
+            name="txMethod"
+            value="session"
+            v-model="txMethod"
+            :disabled="!isSessionActive"
+          />
           Session Key
-        </button>
-        <button @click="sendDirectTransaction" :disabled="loading || !accountAddress" class="secondary">
-          Direct
-        </button>
-      </div>
+        </label>
+        <label>
+          <input type="radio" name="txMethod" value="direct" v-model="txMethod" />
+          Direct (Main Signer)
+        </label>
+      </fieldset>
+      <button
+        @click="handleSendTransaction"
+        :disabled="loading || !accountAddress || (txMethod === 'session' && !isSessionActive)"
+      >
+        Send
+      </button>
       <p v-if="txHash">
         <a :href="`https://sepolia.etherscan.io/tx/${txHash}`" target="_blank">{{ txHash }}</a>
       </p>
@@ -431,6 +643,7 @@ const handleLogout = async () => {
     <footer>
       <small>Sepolia testnet • Gas sponsored by Alchemy</small>
     </footer>
+    <br>
   </main>
 </template>
 

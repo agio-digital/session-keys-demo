@@ -69,6 +69,8 @@ Required environment variables:
 Required environment variables:
 - `PORT` - Server port (default: 3001)
 - `ALCHEMY_API_KEY` - Alchemy API key for transaction signing
+- `ALCHEMY_GAS_POLICY_ID` - Gas Manager Policy ID for sponsoring transactions
+- `AUTH0_DOMAIN` - Auth0 domain for JWT verification (e.g., dev.login.agiodigital.com)
 
 Copy `.env.example` files in both directories to get started.
 
@@ -90,40 +92,53 @@ Copy `.env.example` files in both directories to get started.
    - Executes transactions on Sepolia testnet respecting permission boundaries
 
 3. **Key Security Properties**
-   - Main private key: stored in browser localStorage, NEVER transmitted to server
+   - Main signer: Alchemy WebSigner with Auth0 SSO (managed by Alchemy, never exposed)
    - Session keys: ephemeral, scoped permissions (spending limits, time windows), sent to server for delegated signing
    - Backend stores session keys in filesystem (WARNING: production should use KMS + database)
-   - Backend only stores account addresses for wallet tracking, never main private keys
-   - Sessions can be revoked instantly via DELETE `/api/session/:userId`
+   - Backend only stores account addresses for wallet tracking
+   - Sessions can be revoked instantly via DELETE `/api/session`
 
 ### Frontend Architecture
 
-- **main.ts**: Initializes Vue app, Auth0 plugin, router
-- **router/index.ts**: Routes with Auth0 auth guard protecting /wallet
+- **main.ts**: Initializes Vue app, Auth0 plugin, Pinia/Pinia Colada, router
+- **router/index.ts**: Routes with Auth0 auth guard protecting /home and /wallet
 - **views/Login.vue**: Landing page with Auth0 login flow
+- **views/Home.vue**: User info page (picture, name, email) after Auth0 login
 - **views/Wallet.vue**: Main interface for wallet creation, session management, transactions
-  - Uses `@alchemy/aa-alchemy` for smart account client creation
-  - Uses `LocalAccountSigner` for EOA owner and session key signing
+  - Uses `@account-kit/wallet-client` for smart wallet client creation
+  - Uses `@account-kit/signer` AlchemyWebSigner with Auth0 SSO
   - Communicates with backend API for session storage and transaction execution
+- **composables/useAlchemySigner.ts**: Singleton Alchemy WebSigner with Auth0 integration
+- **composables/useWalletData.ts**: Pinia Colada query for wallet data
+- **composables/useSessionData.ts**: Pinia Colada queries/mutations for session management
+- **utils/http.ts**: HTTP client with automatic Auth0 JWT token injection
 
 ### Backend Architecture
 
-- **server/src/index.ts**: Express server with 4 endpoints:
+- **server/src/index.ts**: Express server with endpoints:
+  - `POST /api/wallet` - Save wallet address for user
+  - `GET /api/wallet` - Get wallet info (userId from JWT)
   - `POST /api/session` - Store session key with permissions
-  - `GET /api/session/:userId` - Get session info
-  - `DELETE /api/session/:userId` - Revoke session
+  - `GET /api/session` - Get session info (userId from JWT)
+  - `DELETE /api/session` - Revoke session (userId from JWT)
   - `POST /api/transaction` - Execute transaction using stored session key
-- In-memory Map for session storage (keyed by userId from Auth0)
+- **server/src/middleware/auth.ts**: JWT verification using Auth0 JWKS
+- File-based persistence in `server/data/` (sessions.json, wallets.json)
+- Sessions keyed by Auth0 `sub` claim (e.g., `auth0|62b321a0f251f668515fc71b`)
 - Uses `LocalAccountSigner.privateKeyToAccountSigner()` to reconstruct signer from stored key
-- Creates Alchemy client with session signer and existing account address
 
 ### Key Dependencies
 
-- **@alchemy/aa-alchemy**: Alchemy Account Kit for modular account creation
-- **@alchemy/aa-core**: Core AA primitives (LocalAccountSigner, SmartAccountSigner types)
+- **@account-kit/wallet-client**: Alchemy Wallet Client for smart account operations
+- **@account-kit/signer**: AlchemyWebSigner for Auth0 SSO integration
+- **@account-kit/infra**: Alchemy transport and chain configurations
+- **@aa-sdk/core**: Core AA primitives (LocalAccountSigner)
 - **@auth0/auth0-vue**: Auth0 authentication for Vue
+- **@pinia/colada**: Data fetching/caching for Vue (queries, mutations)
+- **jose**: JWT verification library for backend
 - **viem**: Ethereum library for account and key generation
 - **vue-router**: Client-side routing with auth guards
+- **pino**: Logging library for both frontend and backend
 
 ### Network Configuration
 
@@ -178,39 +193,43 @@ Backend validates on every transaction:
 - Check `session.revoked` flag
 - Check `Date.now() > session.expiresAt`
 
-### Smart Account Creation
+### Smart Wallet Client Creation
 
-Client creates account with:
+Client creates wallet with AlchemyWebSigner:
 ```typescript
-const client = await createModularAccountAlchemyClient({
-  apiKey: ALCHEMY_API_KEY,
+const client = createSmartWalletClient({
+  transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
   chain: sepolia,
-  signer,  // LocalAccountSigner with owner EOA
+  signer: alchemySigner,  // AlchemyWebSigner with Auth0 SSO
+  policyId: ALCHEMY_GAS_POLICY_ID,
 });
 ```
 
-Backend reuses existing account with:
+Backend uses session key signer:
 ```typescript
-const client = await createModularAccountAlchemyClient({
-  apiKey: ALCHEMY_API_KEY,
+const sessionSigner = LocalAccountSigner.privateKeyToAccountSigner(session.sessionKey);
+const client = createSmartWalletClient({
+  transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
   chain: sepolia,
   signer: sessionSigner,
-  accountAddress: session.accountAddress,  // Existing account
+  policyId: ALCHEMY_GAS_POLICY_ID,
 });
 ```
 
-### UserOperation Execution
+### Transaction Execution
 
-Backend sends transactions via UserOperations:
+Backend sends transactions via prepare/sign/send flow:
 ```typescript
-const result = await client.sendUserOperation({
-  uo: {
-    target: to as Hex,
-    data: (data || '0x') as Hex,
-    value: BigInt(value || 0),
+const preparedCalls = await client.prepareCalls({
+  from: session.accountAddress,
+  calls: [{ to, value, data }],
+  capabilities: {
+    permissions: { context: session.permissionsContext },
+    paymasterService: { policyId: ALCHEMY_GAS_POLICY_ID },
   },
 });
-const txHash = await client.waitForUserOperationTransaction(result);
+const signedCalls = await signPreparedCalls(sessionSigner, preparedCalls);
+const result = await client.sendPreparedCalls(signedCalls);
 ```
 
 ## Testing
@@ -227,11 +246,11 @@ yarn workspace server test session.test.ts
 
 ## Production Considerations
 
-The README references `/Users/chris/git/middleware/docs/alchemy-session-keys.md` for detailed architecture and production guidance. Key production changes needed:
+Key production changes needed:
 
-1. Replace in-memory session storage with database
+1. Replace file-based session storage with database
 2. Store session keys in KMS (AWS KMS, Google Cloud KMS, etc.)
-3. Add proper authentication/authorization on backend endpoints
-4. Implement permission validation logic before transaction execution
-5. Add rate limiting and monitoring
-6. Use production network instead of Sepolia testnet
+3. Implement permission validation logic before transaction execution
+4. Add rate limiting and monitoring
+5. Use production network instead of Sepolia testnet
+6. Configure proper CORS origins for production domains

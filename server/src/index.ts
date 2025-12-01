@@ -12,6 +12,7 @@ import pino from "pino";
 import { createSmartWalletClient, signPreparedCalls } from "@account-kit/wallet-client";
 import { LocalAccountSigner } from "@aa-sdk/core";
 import { sepolia, alchemy } from "@account-kit/infra";
+import { requireAuth, type AuthRequest } from "./middleware/auth.js";
 
 dotenv.config();
 
@@ -136,11 +137,12 @@ function loadWallets() {
 loadSessions();
 loadWallets();
 
-app.post("/api/wallet", (req, res) => {
-  const { userId, accountAddress } = req.body;
+app.post("/api/wallet", requireAuth, (req: AuthRequest, res) => {
+  const { accountAddress } = req.body;
+  const userId = req.auth!.sub; // Use authenticated user's ID
 
-  if (!userId || !accountAddress) {
-    return res.status(400).json({ error: "Missing required fields" });
+  if (!accountAddress) {
+    return res.status(400).json({ error: "Missing accountAddress" });
   }
 
   wallets.set(userId, {
@@ -155,8 +157,8 @@ app.post("/api/wallet", (req, res) => {
   res.json({ ok: true, accountAddress });
 });
 
-app.get("/api/wallet/:userId", (req, res) => {
-  const { userId } = req.params;
+app.get("/api/wallet", requireAuth, (req: AuthRequest, res) => {
+  const userId = req.auth!.sub;
   const wallet = wallets.get(userId);
 
   if (!wallet) {
@@ -169,65 +171,11 @@ app.get("/api/wallet/:userId", (req, res) => {
   });
 });
 
-// Create a session via Alchemy's Wallet API (wallet_createSession)
-app.post("/api/wallet-session", async (req, res) => {
-  try {
-    const { account, chainId, publicKey, expirySec, permissions } = req.body;
+app.post("/api/session", requireAuth, (req: AuthRequest, res) => {
+  const { sessionId, sessionKey, sessionKeyAddress, accountAddress, signature, permissionsContext, permissions, expiresAt } = req.body;
+  const userId = req.auth!.sub;
 
-    if (!account || !chainId || !publicKey || !expirySec) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    logger.info({ account }, "Creating wallet session");
-
-    // Call Alchemy's wallet_createSession JSON-RPC
-    const alchemyResponse = await fetch(
-      `https://api.g.alchemy.com/v2/${ALCHEMY_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "wallet_createSession",
-          params: [{
-            account,
-            chainId: `0x${chainId.toString(16)}`,
-            key: {
-              publicKey,
-              type: "secp256k1",
-            },
-            permissions: permissions || [{ type: "root" }],
-            expirySec,
-          }],
-        }),
-      }
-    );
-
-    const data = await alchemyResponse.json();
-
-    if (data.error) {
-      logger.error({ error: data.error }, "Alchemy wallet_createSession failed");
-      return res.status(500).json({ error: data.error.message || "Session creation failed" });
-    }
-
-    logger.info({ sessionId: data.result.sessionId }, "✓ Wallet session created");
-
-    res.json({
-      sessionId: data.result.sessionId,
-      signatureRequest: data.result.signatureRequest,
-      context: data.result.context, // Pass through context if Alchemy provides it
-    });
-  } catch (error: any) {
-    logger.error({ error: error.message }, "Wallet session creation failed");
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post("/api/session", (req, res) => {
-  const { userId, sessionId, sessionKey, sessionKeyAddress, accountAddress, signature, permissionsContext, permissions, expiresAt } = req.body;
-
-  if (!userId || !sessionId || !sessionKey || !accountAddress) {
+  if (!sessionId || !sessionKey || !accountAddress) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
@@ -262,9 +210,10 @@ app.post("/api/session", (req, res) => {
 });
 
 // Send transaction with session key via SDK
-app.post("/api/transaction", async (req, res) => {
+app.post("/api/transaction", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { userId, to, value, data } = req.body;
+    const { to, value, data } = req.body;
+    const userId = req.auth!.sub;
 
     const session = sessions.get(userId);
 
@@ -351,9 +300,9 @@ app.post("/api/transaction", async (req, res) => {
   }
 });
 
-// Get session info
-app.get("/api/session/:userId", (req, res) => {
-  const { userId } = req.params;
+// Get session info (userId from JWT)
+app.get("/api/session", requireAuth, (req: AuthRequest, res) => {
+  const userId = req.auth!.sub;
   const session = sessions.get(userId);
 
   if (!session) {
@@ -369,9 +318,9 @@ app.get("/api/session/:userId", (req, res) => {
   });
 });
 
-// Revoke session
-app.delete("/api/session/:userId", (req, res) => {
-  const { userId } = req.params;
+// Revoke session (userId from JWT)
+app.delete("/api/session", requireAuth, (req: AuthRequest, res) => {
+  const userId = req.auth!.sub;
   const session = sessions.get(userId);
 
   if (!session) {

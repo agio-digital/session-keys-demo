@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory } from "vue-router";
-import { useAlchemySigner } from "../composables/useAlchemySigner";
+import { authGuard } from "@auth0/auth0-vue";
 
 const routes = [
   {
@@ -8,16 +8,17 @@ const routes = [
     component: () => import("../views/Login.vue"),
   },
   {
+    path: "/home",
+    name: "home",
+    component: () => import("../views/Home.vue"),
+    beforeEnter: authGuard,
+  },
+  {
     path: "/wallet",
     name: "wallet",
     component: () => import("../views/Wallet.vue"),
-    beforeEnter: () => {
-      const { isAuthenticated } = useAlchemySigner();
-      if (!isAuthenticated.value) {
-        return { name: "login" };
-      }
-      return true;
-    },
+    beforeEnter: authGuard,
+    meta: { requiresAlchemy: true },
   },
 ];
 

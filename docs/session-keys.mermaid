@@ -1,0 +1,66 @@
+%% Session Keys Flow Diagram
+%% Render at: https://mermaid.live or in VS Code with Mermaid extension
+
+sequenceDiagram
+    participant User
+    participant Browser as Browser (Vue App)
+    participant Auth0
+    participant Alchemy as Alchemy WebSigner
+    participant Backend as Backend Server
+    participant Chain as Sepolia Chain
+
+    %% Authentication Phase
+    rect rgb(240, 248, 255)
+        Note over User, Auth0: Authentication Phase
+        User->>Browser: Click Login
+        Browser->>Auth0: Redirect to Auth0
+        Auth0->>User: Show login form
+        User->>Auth0: Enter credentials
+        Auth0->>Browser: Return JWT token
+        Browser->>Alchemy: Auth0 SSO login
+        Alchemy->>Browser: WebSigner connected
+    end
+
+    %% Wallet Creation Phase
+    rect rgb(255, 248, 240)
+        Note over Browser, Chain: Wallet Creation Phase
+        User->>Browser: Click "Create Wallet"
+        Browser->>Alchemy: createSmartWalletClient()
+        Browser->>Alchemy: requestAccount()
+        Alchemy->>Browser: Counterfactual address
+        Browser->>Backend: POST /api/wallet
+        Note right of Backend: Store account address
+        Backend->>Browser: { ok: true }
+    end
+
+    %% Session Creation Phase
+    rect rgb(240, 255, 240)
+        Note over Browser, Backend: Session Creation Phase
+        User->>Browser: Click "Create Session"
+        Browser->>Browser: generatePrivateKey()
+        Note right of Browser: Ephemeral session key
+        Browser->>Alchemy: grantPermissions()
+        Note right of Alchemy: User signs authorization
+        Alchemy->>Browser: permissionsContext
+        Browser->>Backend: POST /api/session
+        Note right of Backend: Store session key + context
+        Backend->>Browser: { ok: true, sessionId }
+    end
+
+    %% Transaction Phase
+    rect rgb(255, 240, 245)
+        Note over Browser, Chain: Transaction Execution Phase
+        User->>Browser: Enter tx details, click Send
+        Browser->>Backend: POST /api/transaction
+        Note right of Backend: Validate session
+        Backend->>Alchemy: prepareCalls()
+        Alchemy->>Backend: preparedCalls
+        Backend->>Backend: signPreparedCalls()
+        Note right of Backend: Sign with session key
+        Backend->>Alchemy: sendPreparedCalls()
+        Alchemy->>Chain: Submit UserOperation
+        Chain->>Alchemy: Transaction hash
+        Alchemy->>Backend: txHash
+        Backend->>Browser: { transactionHash }
+        Browser->>User: Show Etherscan link
+    end

@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryCache } from "@pinia/colada";
-import { computed } from "vue";
+import { computed, toValue, type MaybeRefOrGetter } from "vue";
 import {
   getSession,
   createSession as createSessionApi,
@@ -7,16 +7,19 @@ import {
   sendTransaction as sendTransactionApi,
 } from "../api/session";
 
-export function useSessionData(userId: string) {
+// isAuthenticated controls when the query runs (waits for auth)
+export function useSessionData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
   const queryCache = useQueryCache();
 
-  const { state } = useQuery({
-    key: () => ["session", userId],
-    query: () => getSession(userId),
+  const { state, refetch } = useQuery({
+    key: () => ["session"],
+    query: () => getSession(),
     staleTime: 60_000,
+    // Only fetch when authenticated (if provided)
+    enabled: () => (isAuthenticated !== undefined ? !!toValue(isAuthenticated) : true),
   });
 
-  const { mutate: createSession } = useMutation({
+  const { mutateAsync: createSession } = useMutation({
     mutation: (params: {
       sessionId: string;
       sessionKey: string;
@@ -26,18 +29,17 @@ export function useSessionData(userId: string) {
       permissionsContext?: string;
       permissions: any[];
       expiresAt: number;
-    }) => createSessionApi({ userId, ...params }),
-    onSuccess: () => queryCache.invalidateQueries({ key: ["session", userId] }),
+    }) => createSessionApi(params),
+    onSuccess: () => queryCache.invalidateQueries({ key: ["session"] }),
   });
 
-  const { mutate: revokeSession } = useMutation({
-    mutation: () => revokeSessionApi(userId),
-    onSuccess: () => queryCache.invalidateQueries({ key: ["session", userId] }),
+  const { mutateAsync: revokeSession } = useMutation({
+    mutation: () => revokeSessionApi(),
+    onSuccess: () => queryCache.invalidateQueries({ key: ["session"] }),
   });
 
   const { mutateAsync: sendTransaction } = useMutation({
-    mutation: (params: { to: string; value: string; data?: string }) =>
-      sendTransactionApi({ userId, ...params }),
+    mutation: (params: { to: string; value: string; data?: string }) => sendTransactionApi(params),
   });
 
   return {
@@ -49,5 +51,6 @@ export function useSessionData(userId: string) {
     createSession,
     revokeSession,
     sendTransaction,
+    refetchSession: refetch,
   };
 }
