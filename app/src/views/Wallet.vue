@@ -579,7 +579,7 @@ onUnmounted(() => {
     <article>
       <h3>2. Session Key</h3>
       <label v-if="!isSessionActive"
-        >Duration
+        >Expiry
         <select v-model="sessionDuration">
           <option value="1">1 hour</option>
           <option value="6">6 hours</option>

@@ -79,6 +79,8 @@ ALCHEMY_GAS_POLICY_ID=your-gas-policy-id
 AUTH0_DOMAIN=your-auth0-domain
 ```
 
+> **Note:** `ALCHEMY_GAS_POLICY_ID` is required in **both** client and server. The same policy ID can be used. The client needs it for wallet creation, session authorization, and direct transactions. The server needs it for session key transactions. Both must specify the policy when calling Alchemy's API to sponsor gas fees.
+
 ---
 
 ## Step 1: Initialize Alchemy WebSigner (Client)
