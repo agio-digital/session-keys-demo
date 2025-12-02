@@ -582,6 +582,9 @@ onUnmounted(() => {
           <option value="6">6 hours</option>
           <option value="24">24 hours</option>
           <option value="168">7 days</option>
+          <option value="720">30 days</option>
+          <option value="8760">1 year</option>
+          <option value="87600">10 years</option>
         </select>
       </label>
       <div role="group">
