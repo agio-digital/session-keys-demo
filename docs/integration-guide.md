@@ -399,6 +399,25 @@ const contractCallPermissions = [
 ];
 ```
 
+### Multiple Session Keys
+
+A wallet can have **multiple active session keys** simultaneously. Each `grantPermissions()` call creates an independent session with its own expiry and permissions. Use cases:
+
+- **Short-lived sessions**: Create a 5-minute session for an immediate transaction, then discard
+- **Long-lived sessions**: Create a "never expires" session for a trading bot
+- **Scoped sessions**: Different sessions for different services (e.g., one for swaps, one for transfers)
+
+The demo stores one session per user for simplicity. For multiple sessions, change storage from:
+
+```typescript
+// Single session per user
+sessions.set(userId, sessionData);
+
+// Multiple sessions per user
+sessions.set(userId, new Map([[sessionId, sessionData]]));
+// Or use a database with (userId, sessionId) composite key
+```
+
 ---
 
 ## Step 4: JWT Authentication Middleware (Server)
