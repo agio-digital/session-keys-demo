@@ -1,22 +1,19 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useAuth0 } from "@auth0/auth0-vue";
-import { createSmartWalletClient } from "@account-kit/wallet-client";
-import { sepolia, alchemy } from "@account-kit/infra";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { parseEther, toHex } from "viem";
+import { sepolia } from "@account-kit/infra";
+import { parseEther } from "viem";
+import { SmartWalletClient } from "agio-smart-wallet-client";
 import { logger } from "../utils/logger";
 import { until } from "../utils/until";
 import { useWalletData } from "../composables/useWalletData";
 import { useSessionData } from "../composables/useSessionData";
 import { useAlchemySigner } from "../composables/useAlchemySigner";
-import { getWalletFromServer } from "../api/wallet";
 import router from "@/router";
 import { delay } from "@/utils/delay";
 
 const { logout: auth0Logout, isLoading, isAuthenticated } = useAuth0();
 const {
-  user,
   isAuthenticated: isAlchemyAuthenticated,
   isInitializing,
   error: alchemyError,
@@ -36,6 +33,13 @@ if (!ALCHEMY_API_KEY) {
 if (!ALCHEMY_GAS_POLICY_ID) {
   throw new Error("VITE_ALCHEMY_GAS_POLICY_ID is required in environment variables");
 }
+
+// Initialize smart wallet client
+const walletClient = new SmartWalletClient({
+  alchemyApiKey: ALCHEMY_API_KEY,
+  policyId: ALCHEMY_GAS_POLICY_ID,
+  chain: sepolia,
+});
 
 const mounting = ref(true);
 
@@ -61,12 +65,7 @@ onMounted(async () => {
       return;
     }
 
-    // If Alchemy authenticated, sync wallet to server if needed
-    if (isAlchemyAuthenticated.value) {
-      logger.info("[Wallet] Alchemy authenticated, checking wallet sync");
-      await syncWalletToServer();
-    } else {
-      // Don't auto-redirect - let user click "Connect Wallet" button
+    if (!isAlchemyAuthenticated.value) {
       logger.info("[Wallet] Alchemy not authenticated, waiting for user to connect");
     }
   } catch (err) {
@@ -76,12 +75,8 @@ onMounted(async () => {
   }
 });
 
-// Use Alchemy user ID for localStorage caching only
-const alchemyUserId = computed(() => user.value?.userId || user.value?.address || "");
-
 // Pinia Colada auto-fetches and caches (userId determined from JWT on server)
-// Queries only run when alchemyUserId/isAlchemyAuthenticated have values
-const { wallet, saveWallet: saveWalletMutation } = useWalletData(alchemyUserId);
+const { wallet, saveWallet: saveWalletMutation } = useWalletData(isAlchemyAuthenticated);
 const {
   session,
   isSessionActive,
@@ -104,31 +99,6 @@ const isConnectingWallet = ref(false);
 
 // Persist recipient address
 watch(recipientAddress, (val) => localStorage.setItem("recipientAddress", val));
-
-// Sync local wallet to server if it exists locally but not on server
-async function syncWalletToServer() {
-  const localCacheKey = alchemyUserId.value;
-  if (!localCacheKey) return;
-
-  const localData = localStorage.getItem(`wallet_${localCacheKey}`);
-  if (!localData) return;
-
-  const localWallet = JSON.parse(localData);
-  const serverWallet = await getWalletFromServer();
-
-  if (localWallet.accountAddress && !serverWallet) {
-    logger.info({ accountAddress: localWallet.accountAddress }, "[Wallet] Syncing local wallet to server");
-    status.value = "Syncing wallet to server...";
-    try {
-      await saveWalletMutation({ accountAddress: localWallet.accountAddress });
-      status.value = "Wallet synced to server";
-      logger.info("[Wallet] Wallet synced to server successfully");
-    } catch (err: any) {
-      logger.error({ err }, "[Wallet] Failed to sync wallet to server");
-      status.value = `Failed to sync wallet: ${err.message}`;
-    }
-  }
-}
 
 // Computed from Pinia Colada queries
 const accountAddress = computed(() => wallet.value?.accountAddress || "");
@@ -184,18 +154,7 @@ async function createWallet() {
     loading.value = true;
     status.value = "Creating wallet via Alchemy Wallet API...";
 
-    // Create smart wallet client with Alchemy's Wallet API
-    const client = createSmartWalletClient({
-      transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
-      chain: sepolia,
-      signer: alchemySigner,
-      policyId: ALCHEMY_GAS_POLICY_ID,
-    });
-
-    // Request account from Alchemy - counterfactual until first transaction
-    status.value = "Registering account with Alchemy...";
-    const account = await client.requestAccount();
-    const address = account.address;
+    const address = await walletClient.createWallet(alchemySigner);
 
     // Save wallet data to server (required for session key transactions)
     status.value = "Saving wallet to server...";
@@ -219,21 +178,9 @@ async function checkAccountDeployed() {
   if (!accountAddress.value) return false;
 
   try {
-    // Check bytecode at account address
-    const response = await fetch(`https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_getCode",
-        params: [accountAddress.value, "latest"],
-      }),
-    });
-    const data = await response.json();
-    const hasCode = data.result && data.result !== "0x" && data.result !== "0x0";
-    isAccountDeployed.value = hasCode;
-    return hasCode;
+    const deployed = await walletClient.isAccountDeployed(accountAddress.value as `0x${string}`);
+    isAccountDeployed.value = deployed;
+    return deployed;
   } catch (error) {
     logger.error({ error }, "Failed to check account deployment");
     return false;
@@ -247,23 +194,9 @@ async function fetchAccountBalance() {
   }
 
   try {
-    const response = await fetch(`https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_getBalance",
-        params: [accountAddress.value, "latest"],
-      }),
-    });
-    const data = await response.json();
-    if (data.result) {
-      // Convert hex wei to ETH with 6 decimal places
-      const wei = BigInt(data.result);
-      const eth = Number(wei) / 1e18;
-      accountBalance.value = eth.toFixed(6);
-    }
+    const wei = await walletClient.getBalance(accountAddress.value as `0x${string}`);
+    const eth = Number(wei) / 1e18;
+    accountBalance.value = eth.toFixed(6);
   } catch (error) {
     logger.error({ error }, "Failed to fetch account balance");
   }
@@ -280,56 +213,30 @@ async function createSession() {
     loading.value = true;
     status.value = "Creating session via SDK grantPermissions...";
 
-    // Generate session key locally
-    const sessionPrivateKey = generatePrivateKey();
-    const sessionKeyAccount = privateKeyToAccount(sessionPrivateKey);
     const durationHours = parseInt(sessionDuration.value);
-    // "Never" (0) uses max uint32 timestamp (year 2106)
-    const expiresAt = durationHours === 0
-      ? 4294967295 * 1000  // Max uint32 in ms
-      : Date.now() + durationHours * 60 * 60 * 1000;
-    const expirySec = Math.floor(expiresAt / 1000);
-
-    // Create smart wallet client with AlchemyWebSigner
-    const client = createSmartWalletClient({
-      transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
-      chain: sepolia,
-      signer: alchemySigner,
-      policyId: ALCHEMY_GAS_POLICY_ID,
-    });
-
-    // Request account to associate signer with account
-    const account = await client.requestAccount();
-
-    // Use SDK's grantPermissions - expects ADDRESS as "publicKey" for secp256k1
-    const permissions = await client.grantPermissions({
-      account: account.address,
-      expirySec,
-      key: {
-        publicKey: sessionKeyAccount.address,
-        type: "secp256k1",
-      },
-      permissions: [{ type: "root" }],
-    });
-
-    // Extract sessionId from context (context = 0x00 + sessionId + signature)
-    const sessionId = `0x${permissions.context.slice(4, 36)}`;
-    const signature = `0x${permissions.context.slice(36)}`;
+    const result = await walletClient.createSession(
+      alchemySigner,
+      accountAddress.value as `0x${string}`,
+      {
+        expiryHours: durationHours,
+        permissions: [{ type: "root" }],
+      }
+    );
 
     // Store session data on server
     await createSessionMutation({
-      sessionId,
-      sessionKey: sessionPrivateKey,
-      sessionKeyAddress: sessionKeyAccount.address, // Also store address for verification
+      sessionId: result.sessionId,
+      sessionKey: result.sessionKey,
+      sessionKeyAddress: result.sessionKeyAddress,
       accountAddress: accountAddress.value,
-      signature,
-      permissionsContext: permissions.context, // Store the full context
-      permissions: [{ type: "root" }],
-      expiresAt,
+      signature: result.signature,
+      permissionsContext: result.permissionsContext,
+      permissions: result.permissions,
+      expiresAt: result.expiresAt,
     });
 
-    status.value = `Session created: ${sessionId}`;
-    logger.info({ sessionId }, "Session created");
+    status.value = `Session created: ${result.sessionId}`;
+    logger.info({ sessionId: result.sessionId }, "Session created");
   } catch (error: any) {
     logger.error({ error }, "Session creation error");
     status.value = `Error: ${error.message}`;
@@ -352,42 +259,12 @@ async function sendDirectTransaction() {
     txHash.value = "";
     status.value = "Sending direct transaction (main signer)...";
 
-    const client = createSmartWalletClient({
-      transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
-      chain: sepolia,
-      signer: alchemySigner,
-      policyId: ALCHEMY_GAS_POLICY_ID,
+    const hash = await walletClient.sendDirectTransaction(alchemySigner, {
+      to: recipientAddress.value as `0x${string}`,
+      value: amount.value,
     });
 
-    const account = await client.requestAccount();
-    const valueHex = toHex(parseEther(amount.value));
-
-    // Prepare, sign, and send
-    const preparedCalls = await client.prepareCalls({
-      from: account.address,
-      calls: [
-        {
-          to: recipientAddress.value as `0x${string}`,
-          value: valueHex,
-          data: "0x" as `0x${string}`,
-        },
-      ],
-      capabilities: {
-        paymasterService: { policyId: ALCHEMY_GAS_POLICY_ID },
-      },
-    });
-
-    const signedCalls = await client.signPreparedCalls(preparedCalls);
-    const result = await client.sendPreparedCalls(signedCalls);
-
-    // Wait for confirmation
-    const callId = result.preparedCallIds[0];
-    if (callId) {
-      status.value = "Waiting for confirmation...";
-      const txResult = await client.waitForCallsStatus({ id: callId });
-      txHash.value = txResult.receipts?.[0]?.transactionHash || callId;
-    }
-
+    txHash.value = hash;
     status.value = "Direct transaction sent!";
     logger.info({ txHash: txHash.value }, "Direct transaction completed");
   } catch (error: any) {
@@ -455,21 +332,14 @@ async function revokeSession() {
 }
 
 async function resetWallet() {
-  if (!alchemyUserId.value) return;
-
   try {
     loading.value = true;
-    status.value = "Resetting wallet...";
+    status.value = "Revoking session...";
 
-    // Clear local storage for this user
-    localStorage.removeItem(`wallet_${alchemyUserId.value}`);
-
-    // Also revoke any existing session
     if (session.value) {
       await revokeSessionMutation();
     }
 
-    // Force refresh wallet data (will return null now)
     window.location.reload();
   } catch (error: any) {
     logger.error({ error }, "Reset wallet error");

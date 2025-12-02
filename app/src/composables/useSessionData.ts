@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryCache } from "@pinia/colada";
 import { computed, toValue, type MaybeRefOrGetter } from "vue";
+import { isSessionActive } from "agio-smart-wallet-core";
 import {
   getSession,
   createSession as createSessionApi,
@@ -15,7 +16,6 @@ export function useSessionData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
     key: () => ["session"],
     query: () => getSession(),
     staleTime: 60_000,
-    // Only fetch when authenticated (if provided)
     enabled: () => (isAuthenticated !== undefined ? !!toValue(isAuthenticated) : true),
   });
 
@@ -44,10 +44,7 @@ export function useSessionData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
 
   return {
     session: computed(() => state.value.data),
-    isSessionActive: computed(() => {
-      const s = state.value.data;
-      return !!s && !s.revoked && Date.now() < s.expiresAt;
-    }),
+    isSessionActive: computed(() => isSessionActive(state.value.data)),
     createSession,
     revokeSession,
     sendTransaction,

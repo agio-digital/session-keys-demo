@@ -1,24 +1,10 @@
 import { http } from "../utils/http";
+import type { SessionInfo } from "agio-smart-wallet-core";
 
-export type SessionData = {
-  sessionId: string;
-  accountAddress: string;
-  expiresAt: number;
-  revoked: boolean;
-  permissions: any[];
-};
-
-export async function getSession(): Promise<SessionData | null> {
+export async function getSession(): Promise<SessionInfo | null> {
   try {
-    const data = await http.get<SessionData>("/api/session");
-
-    if (data.revoked || Date.now() > data.expiresAt) {
-      return null;
-    }
-
-    return data;
+    return await http.get<SessionInfo>("/api/session");
   } catch {
-    // 404 or error - no session
     return null;
   }
 }
