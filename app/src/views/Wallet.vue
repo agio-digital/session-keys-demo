@@ -99,6 +99,7 @@ const recipientAddress = ref(
 );
 const amount = ref("0.00001");
 const txMethod = ref<"session" | "direct">("session");
+const sessionDuration = ref("24"); // hours
 const isConnectingWallet = ref(false);
 
 // Persist recipient address
@@ -282,7 +283,8 @@ async function createSession() {
     // Generate session key locally
     const sessionPrivateKey = generatePrivateKey();
     const sessionKeyAccount = privateKeyToAccount(sessionPrivateKey);
-    const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+    const durationMs = parseInt(sessionDuration.value) * 60 * 60 * 1000;
+    const expiresAt = Date.now() + durationMs;
     const expirySec = Math.floor(expiresAt / 1000);
 
     // Create smart wallet client with AlchemyWebSigner
@@ -573,6 +575,15 @@ onUnmounted(() => {
 
     <article>
       <h3>2. Session Key</h3>
+      <label v-if="!isSessionActive"
+        >Duration
+        <select v-model="sessionDuration">
+          <option value="1">1 hour</option>
+          <option value="6">6 hours</option>
+          <option value="24">24 hours</option>
+          <option value="168">7 days</option>
+        </select>
+      </label>
       <div role="group">
         <button @click="createSession" :disabled="loading || !accountAddress || isSessionActive">
           {{ isSessionActive ? "Active" : "Create" }}
