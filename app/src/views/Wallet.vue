@@ -283,8 +283,11 @@ async function createSession() {
     // Generate session key locally
     const sessionPrivateKey = generatePrivateKey();
     const sessionKeyAccount = privateKeyToAccount(sessionPrivateKey);
-    const durationMs = parseInt(sessionDuration.value) * 60 * 60 * 1000;
-    const expiresAt = Date.now() + durationMs;
+    const durationHours = parseInt(sessionDuration.value);
+    // "Never" (0) uses max uint32 timestamp (year 2106)
+    const expiresAt = durationHours === 0
+      ? 4294967295 * 1000  // Max uint32 in ms
+      : Date.now() + durationHours * 60 * 60 * 1000;
     const expirySec = Math.floor(expiresAt / 1000);
 
     // Create smart wallet client with AlchemyWebSigner
@@ -584,7 +587,7 @@ onUnmounted(() => {
           <option value="168">7 days</option>
           <option value="720">30 days</option>
           <option value="8760">1 year</option>
-          <option value="87600">10 years</option>
+          <option value="0">Never</option>
         </select>
       </label>
       <div role="group">
