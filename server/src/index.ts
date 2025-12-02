@@ -5,14 +5,12 @@ import https from "https";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
-import type { Hex } from "viem";
-import { getAddress } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 import pino from "pino";
-import { createSmartWalletClient, signPreparedCalls } from "@account-kit/wallet-client";
-import { LocalAccountSigner } from "@aa-sdk/core";
-import { sepolia, alchemy } from "@account-kit/infra";
+import { sepolia } from "@account-kit/infra";
+import { SmartWalletService } from "agio-smart-wallet-server";
+import type { SessionInfo } from "agio-smart-wallet-core";
 import { requireAuth, type AuthRequest } from "./middleware/auth.js";
+import { FileStorage } from "./storage.js";
 
 dotenv.config();
 
@@ -27,6 +25,7 @@ const logger = pino({
   },
 });
 
+// SSL certificate setup
 const certsDir = path.resolve(process.cwd(), "certs");
 const keyPath = path.join(certsDir, "key.pem");
 const certPath = path.join(certsDir, "cert.pem");
@@ -58,6 +57,18 @@ if (!ALCHEMY_GAS_POLICY_ID) {
   throw new Error("ALCHEMY_GAS_POLICY_ID is required in environment variables");
 }
 
+// Initialize storage and wallet service
+const storage = new FileStorage();
+const walletService = new SmartWalletService({
+  alchemyApiKey: ALCHEMY_API_KEY,
+  policyId: ALCHEMY_GAS_POLICY_ID,
+  chain: sepolia,
+  sessionStorage: storage,
+  walletStorage: storage,
+});
+
+logger.info(`✓ Loaded ${storage.sessionCount} sessions, ${storage.walletCount} wallets`);
+
 const app = express();
 
 app.use(cors({
@@ -68,272 +79,120 @@ app.use(cors({
 }));
 app.use(express.json());
 
-const dataDir = path.resolve(process.cwd(), "data");
-const sessionsFile = path.join(dataDir, "sessions.json");
-const walletsFile = path.join(dataDir, "wallets.json");
-
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-type SessionData = {
-  sessionId: string;
-  sessionKey: string;
-  sessionKeyAddress: string; // Address registered with Alchemy
-  accountAddress: string;
-  signature: string;
-  permissionsContext?: string; // Full context from SDK grantPermissions
-  permissions: any[];
-  expiresAt: number;
-  revoked: boolean;
-};
-
-type WalletData = {
-  accountAddress: string;
-  createdAt: number;
-};
-
-const sessions = new Map<string, SessionData>();
-const wallets = new Map<string, WalletData>();
-
-function saveSessions() {
-  const data = Object.fromEntries(sessions);
-  fs.writeFileSync(sessionsFile, JSON.stringify(data, null, 2));
-}
-
-function loadSessions() {
-  try {
-    if (fs.existsSync(sessionsFile)) {
-      const data = JSON.parse(fs.readFileSync(sessionsFile, "utf-8"));
-      Object.entries(data).forEach(([userId, session]) => {
-        sessions.set(userId, session as SessionData);
-      });
-      logger.info(`✓ Loaded ${sessions.size} sessions from disk`);
-    }
-  } catch (error) {
-    logger.error({ error }, "Failed to load sessions from disk");
-  }
-}
-
-function saveWallets() {
-  const data = Object.fromEntries(wallets);
-  fs.writeFileSync(walletsFile, JSON.stringify(data, null, 2));
-}
-
-function loadWallets() {
-  try {
-    if (fs.existsSync(walletsFile)) {
-      const data = JSON.parse(fs.readFileSync(walletsFile, "utf-8"));
-      Object.entries(data).forEach(([userId, wallet]) => {
-        wallets.set(userId, wallet as WalletData);
-      });
-      logger.info(`✓ Loaded ${wallets.size} wallets from disk`);
-    }
-  } catch (error) {
-    logger.error({ error }, "Failed to load wallets from disk");
-  }
-}
-
-loadSessions();
-loadWallets();
-
-app.post("/api/wallet", requireAuth, (req: AuthRequest, res) => {
+// Wallet endpoints
+app.post("/api/wallet", requireAuth, async (req: AuthRequest, res) => {
   const { accountAddress } = req.body;
-  const userId = req.auth!.sub; // Use authenticated user's ID
+  const userId = req.auth!.sub;
 
   if (!accountAddress) {
     return res.status(400).json({ error: "Missing accountAddress" });
   }
 
-  wallets.set(userId, {
-    accountAddress,
-    createdAt: Date.now(),
-  });
-
-  saveWallets();
-
-  logger.info({ userId, accountAddress }, "✓ Wallet saved");
-
-  res.json({ ok: true, accountAddress });
-});
-
-app.get("/api/wallet", requireAuth, (req: AuthRequest, res) => {
-  const userId = req.auth!.sub;
-  const wallet = wallets.get(userId);
-
-  if (!wallet) {
-    return res.status(404).json({ error: "No wallet found" });
+  try {
+    await walletService.saveWallet(userId, accountAddress);
+    logger.info({ userId, accountAddress }, "✓ Wallet saved");
+    res.json({ ok: true, accountAddress });
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Failed to save wallet");
+    res.status(500).json({ error: error.message });
   }
-
-  res.json({
-    accountAddress: wallet.accountAddress,
-    createdAt: wallet.createdAt,
-  });
 });
 
-app.post("/api/session", requireAuth, (req: AuthRequest, res) => {
-  const { sessionId, sessionKey, sessionKeyAddress, accountAddress, signature, permissionsContext, permissions, expiresAt } = req.body;
+app.get("/api/wallet", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
+
+  try {
+    const wallet = await walletService.getWallet(userId);
+    if (!wallet) {
+      return res.status(404).json({ error: "No wallet found" });
+    }
+    res.json(wallet);
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Failed to get wallet");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Session endpoints
+app.post("/api/session", requireAuth, async (req: AuthRequest, res) => {
+  const userId = req.auth!.sub;
+  const { sessionId, sessionKey, sessionKeyAddress, accountAddress, signature, permissionsContext, permissions, expiresAt } = req.body;
 
   if (!sessionId || !sessionKey || !accountAddress) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  // Verify session key address matches derived address
-  const derivedAddress = privateKeyToAccount(sessionKey as Hex).address;
-  if (sessionKeyAddress && derivedAddress.toLowerCase() !== sessionKeyAddress.toLowerCase()) {
-    logger.error({
+  try {
+    await walletService.storeSession(userId, {
+      sessionId,
+      sessionKey,
       sessionKeyAddress,
-      derivedAddress,
-    }, "Session key address mismatch!");
-    return res.status(400).json({ error: "Session key address mismatch" });
+      accountAddress,
+      signature,
+      permissionsContext,
+      permissions,
+      expiresAt,
+    });
+
+    logger.info({ userId, sessionId, accountAddress }, "✓ Session created");
+    res.json({ ok: true, sessionId, accountAddress });
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Failed to create session");
+    res.status(400).json({ error: error.message });
   }
-
-  // Store session (in production: store in DB + KMS)
-  sessions.set(userId, {
-    sessionId,
-    sessionKey,
-    sessionKeyAddress: sessionKeyAddress || derivedAddress,
-    accountAddress,
-    signature,
-    permissionsContext, // Store the full SDK-generated context
-    permissions,
-    expiresAt,
-    revoked: false
-  });
-
-  saveSessions();
-
-  logger.info({ userId, sessionId, accountAddress }, "✓ Session created");
-
-  res.json({ ok: true, sessionId, accountAddress });
 });
 
-// Send transaction with session key via SDK
-app.post("/api/transaction", requireAuth, async (req: AuthRequest, res) => {
+app.get("/api/session", requireAuth, async (req: AuthRequest, res) => {
+  const userId = req.auth!.sub;
+
   try {
-    const { to, value, data } = req.body;
-    const userId = req.auth!.sub;
-
-    const session = sessions.get(userId);
-
+    const session = await walletService.getSession(userId);
     if (!session) {
       return res.status(404).json({ error: "No session found" });
     }
 
-    if (session.revoked) {
-      return res.status(403).json({ error: "Session revoked" });
-    }
-
-    if (Date.now() > session.expiresAt) {
-      return res.status(403).json({ error: "Session expired" });
-    }
-
-    const checksummedTo = getAddress(to);
-
-    logger.info({ userId, to: checksummedTo, value }, "Sending transaction");
-
-    // Create session signer and client
-    const sessionSigner = LocalAccountSigner.privateKeyToAccountSigner(session.sessionKey as Hex);
-    const client = createSmartWalletClient({
-      transport: alchemy({ apiKey: ALCHEMY_API_KEY }),
-      chain: sepolia,
-      signer: sessionSigner,
-      policyId: ALCHEMY_GAS_POLICY_ID,
-    });
-
-    // Get the permissions context
-    const context = session.permissionsContext;
-    if (!context) {
-      return res.status(400).json({ error: "No permissions context found for session" });
-    }
-
-    const permissions = { context: context as `0x${string}` };
-    const valueHex = `0x${BigInt(value || 0).toString(16)}` as `0x${string}`;
-
-    // Prepare, sign, and send transaction
-    const preparedCalls = await client.prepareCalls({
-      from: session.accountAddress as `0x${string}`,
-      calls: [{
-        to: checksummedTo as `0x${string}`,
-        value: valueHex,
-        data: (data || "0x") as `0x${string}`,
-      }],
-      capabilities: {
-        permissions,
-        paymasterService: { policyId: ALCHEMY_GAS_POLICY_ID! },
-      },
-    });
-
-    const signedCalls = await signPreparedCalls(sessionSigner, preparedCalls);
-    const result = await client.sendPreparedCalls({
-      ...signedCalls,
-      capabilities: { permissions },
-    } as any);
-
-    // Wait for confirmation
-    const callId = result.preparedCallIds?.[0];
-    let txHash = callId;
-
-    if (callId) {
-      try {
-        const txResult = await client.waitForCallsStatus({ id: callId });
-        txHash = txResult.receipts?.[0]?.transactionHash || callId;
-      } catch (waitError: any) {
-        logger.warn({ error: waitError.message }, "Could not wait for confirmation");
-      }
-    }
-
-    logger.info({ txHash }, "✓ Transaction sent");
-
-    res.json({
-      success: true,
-      transactionHash: txHash,
-      result,
-    });
+    const info: SessionInfo = {
+      sessionId: session.sessionId,
+      permissions: session.permissions,
+      expiresAt: session.expiresAt,
+      revoked: session.revoked,
+    };
+    res.json(info);
   } catch (error: any) {
-    logger.error({ error: error.message, stack: error.stack }, "Transaction failed");
-    res.status(500).json({
-      error: "Transaction failed",
-      message: error.message
-    });
+    logger.error({ error: error.message }, "Failed to get session");
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Get session info (userId from JWT)
-app.get("/api/session", requireAuth, (req: AuthRequest, res) => {
+app.delete("/api/session", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
-  const session = sessions.get(userId);
 
-  if (!session) {
-    return res.status(404).json({ error: "No session found" });
+  try {
+    await walletService.revokeSession(userId);
+    logger.info({ userId }, "✓ Session revoked");
+    res.json({ ok: true, message: "Session revoked" });
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Failed to revoke session");
+    res.status(500).json({ error: error.message });
   }
-
-  res.json({
-    sessionId: session.sessionId,
-    permissions: session.permissions,
-    expiresAt: session.expiresAt,
-    revoked: session.revoked,
-    isExpired: Date.now() > session.expiresAt
-  });
 });
 
-// Revoke session (userId from JWT)
-app.delete("/api/session", requireAuth, (req: AuthRequest, res) => {
+// Transaction endpoint
+app.post("/api/transaction", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
-  const session = sessions.get(userId);
+  const { to, value, data } = req.body;
 
-  if (!session) {
-    return res.status(404).json({ error: "No session found" });
+  try {
+    logger.info({ userId, to, value }, "Sending transaction");
+
+    const result = await walletService.sendTransaction(userId, { to, value, data });
+
+    logger.info({ txHash: result.transactionHash }, "✓ Transaction sent");
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Transaction failed");
+    res.status(500).json({ error: "Transaction failed", message: error.message });
   }
-
-  session.revoked = true;
-
-  saveSessions();
-
-  logger.info({ userId }, "✓ Session revoked");
-
-  res.json({ ok: true, message: "Session revoked" });
 });
 
 const httpsServer = https.createServer({

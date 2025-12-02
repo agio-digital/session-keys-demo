@@ -1,39 +1,75 @@
 import { describe, it, expect } from "vitest";
+import {
+  isSessionActive,
+  validateSession,
+  calculateExpiry,
+  MAX_EXPIRY_MS,
+} from "agio-smart-wallet-core";
 
-describe("Session Management", () => {
-  it("should validate session expiry", () => {
-    const now = Date.now();
-    const expiresAt = now + 7 * 24 * 60 * 60 * 1000; // 7 days from now
+describe("Session Validation", () => {
+  it("should return valid for active session", () => {
+    const session = {
+      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+      revoked: false,
+    };
 
-    expect(now < expiresAt).toBe(true);
+    expect(isSessionActive(session)).toBe(true);
+    expect(validateSession(session)).toEqual({ valid: true });
   });
 
-  it("should detect expired session", () => {
-    const now = Date.now();
-    const expiresAt = now - 1000; // 1 second ago
+  it("should return invalid for expired session", () => {
+    const session = {
+      expiresAt: Date.now() - 1000,
+      revoked: false,
+    };
 
-    expect(now > expiresAt).toBe(true);
+    expect(isSessionActive(session)).toBe(false);
+    expect(validateSession(session)).toEqual({ valid: false, reason: "expired" });
   });
 
-  it("should generate valid session ID", () => {
-    const sessionId = "session-" + Math.random().toString(36).slice(2, 11);
+  it("should return invalid for revoked session", () => {
+    const session = {
+      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+      revoked: true,
+    };
 
-    expect(sessionId).toMatch(/^session-[a-z0-9]+$/);
-    expect(sessionId.length).toBeGreaterThan(8);
+    expect(isSessionActive(session)).toBe(false);
+    expect(validateSession(session)).toEqual({ valid: false, reason: "revoked" });
   });
 
-  it("should validate permissions structure", () => {
-    const permissions = [
-      {
-        type: "native-token-transfer",
-        data: {
-          maxAmount: "1000000000000000000",
-        },
-      },
-    ];
+  it("should return invalid for null session", () => {
+    expect(isSessionActive(null)).toBe(false);
+    expect(validateSession(null)).toEqual({ valid: false, reason: "not_found" });
+  });
+});
 
-    expect(permissions).toHaveLength(1);
-    expect(permissions[0].type).toBe("native-token-transfer");
-    expect(permissions[0].data.maxAmount).toBe("1000000000000000000");
+describe("Expiry Calculation", () => {
+  it("should calculate expiry from hours", () => {
+    const before = Date.now();
+    const expiry = calculateExpiry({ expiryHours: 24 });
+    const after = Date.now();
+
+    expect(expiry).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
+    expect(expiry).toBeLessThanOrEqual(after + 24 * 60 * 60 * 1000);
+  });
+
+  it("should use max expiry for 0 hours (never)", () => {
+    const expiry = calculateExpiry({ expiryHours: 0 });
+    expect(expiry).toBe(MAX_EXPIRY_MS);
+  });
+
+  it("should use explicit expiresAt when provided", () => {
+    const explicit = Date.now() + 1000000;
+    const expiry = calculateExpiry({ expiresAt: explicit });
+    expect(expiry).toBe(explicit);
+  });
+
+  it("should default to 24 hours", () => {
+    const before = Date.now();
+    const expiry = calculateExpiry();
+    const after = Date.now();
+
+    expect(expiry).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
+    expect(expiry).toBeLessThanOrEqual(after + 24 * 60 * 60 * 1000);
   });
 });
