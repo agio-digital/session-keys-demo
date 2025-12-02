@@ -15,6 +15,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "registry": "https://packages.agiodigital.com"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
