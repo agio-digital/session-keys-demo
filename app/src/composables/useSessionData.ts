@@ -44,6 +44,7 @@ export function useSessionData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
 
   return {
     session: computed(() => state.value.data),
+    sessionStatus: computed(() => state.value.status),
     isSessionActive: computed(() => isSessionActive(state.value.data)),
     createSession,
     revokeSession,

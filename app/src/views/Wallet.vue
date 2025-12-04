@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, reactive } from "vue";
 import { useAuth0 } from "@auth0/auth0-vue";
 import { sepolia } from "@account-kit/infra";
-import { parseEther } from "viem";
+import { parseEther, parseUnits, encodeFunctionData, erc20Abi, type Hex, type Address } from "viem";
 import { SmartWalletClient } from "agio-smart-wallet-client";
 import { logger } from "../utils/logger";
+import { getTokens, getNativeToken, type TokenConfig } from "../config/tokens";
 import { until } from "../utils/until";
 import { useWalletData } from "../composables/useWalletData";
 import { useSessionData } from "../composables/useSessionData";
@@ -76,9 +77,10 @@ onMounted(async () => {
 });
 
 // Pinia Colada auto-fetches and caches (userId determined from JWT on server)
-const { wallet, saveWallet: saveWalletMutation } = useWalletData(isAlchemyAuthenticated);
+const { wallet, walletStatus, saveWallet: saveWalletMutation } = useWalletData(isAlchemyAuthenticated);
 const {
   session,
+  sessionStatus,
   isSessionActive,
   createSession: createSessionMutation,
   revokeSession: revokeSessionMutation,
@@ -96,6 +98,49 @@ const amount = ref("0.00001");
 const txMethod = ref<"session" | "direct">("session");
 const sessionDuration = ref("24"); // hours
 const isConnectingWallet = ref(false);
+const lastTxHash = ref("");
+const isRefreshing = ref(false);
+
+// Token configuration from chain
+const chainId = sepolia.id;
+const nativeToken = getNativeToken(chainId);
+const configuredTokens = getTokens(chainId);
+
+// Token state - native + ERC20 tokens
+const selectedToken = ref<string>(nativeToken.symbol);
+const tokenAmounts = reactive<Record<string, string>>({
+  [nativeToken.symbol]: "0.00001",
+  ...Object.fromEntries(configuredTokens.map((t) => [t.symbol, "1"])),
+});
+
+// Token balances: { symbol: { balance, decimals, formatted } }
+interface TokenBalance {
+  balance: bigint;
+  decimals: number;
+  formatted: string;
+}
+const tokenBalances = reactive<Record<string, TokenBalance | null>>({});
+
+// Computed for unified amount input
+const unifiedAmount = computed({
+  get: () => tokenAmounts[selectedToken.value] ?? "0",
+  set: (val) => {
+    tokenAmounts[selectedToken.value] = val;
+  },
+});
+
+// Get current token's balance info
+const currentTokenBalance = computed(() => {
+  if (selectedToken.value === nativeToken.symbol) {
+    return accountBalance.value ? { formatted: accountBalance.value } : null;
+  }
+  return tokenBalances[selectedToken.value];
+});
+
+// Get current token config (for ERC20s)
+const currentTokenConfig = computed(() =>
+  configuredTokens.find((t) => t.symbol === selectedToken.value)
+);
 
 // Persist recipient address
 watch(recipientAddress, (val) => localStorage.setItem("recipientAddress", val));
@@ -105,24 +150,30 @@ const accountAddress = computed(() => wallet.value?.accountAddress || "");
 const hasWallet = computed(() => !!wallet.value);
 
 // Validate data consistency: if session exists but no wallet, revoke the session
-// Only run after initial mount completes to avoid race with async queries
-watch([session, wallet, mounting], ([sessionData, walletData, isMounting]) => {
-  // Don't check during initial mount - wait for queries to complete
-  if (isMounting) return;
+// Only run after both queries have completed to avoid race conditions
+watch(
+  [session, wallet, walletStatus, sessionStatus, mounting],
+  ([sessionData, walletData, wStatus, sStatus, isMounting]) => {
+    // Don't check during initial mount
+    if (isMounting) return;
 
-  if (sessionData && !walletData) {
-    logger.warn("Inconsistent state: session exists but no wallet found. Revoking session.");
-    revokeSessionMutation();
-    status.value = "Session revoked: wallet data missing. Please create a new wallet.";
+    // Wait for both queries to complete (not pending/loading)
+    if (wStatus === "pending" || sStatus === "pending") return;
+
+    if (sessionData && !walletData) {
+      logger.warn("Inconsistent state: session exists but no wallet found. Revoking session.");
+      revokeSessionMutation();
+      status.value = "Session revoked: wallet data missing. Please create a new wallet.";
+    }
   }
-});
+);
 
-// Check if account is deployed and fetch balance when account address is available
+// Check if account is deployed and fetch balances when account address is available
 watch(
   () => accountAddress.value,
   async (address) => {
     if (address) {
-      await Promise.all([checkAccountDeployed(), fetchAccountBalance()]);
+      await Promise.all([checkAccountDeployed(), fetchAccountBalance(), fetchTokenBalances()]);
     }
   },
   { immediate: true }
@@ -199,6 +250,40 @@ async function fetchAccountBalance() {
     accountBalance.value = eth.toFixed(6);
   } catch (error) {
     logger.error({ error }, "Failed to fetch account balance");
+  }
+}
+
+async function fetchTokenBalances() {
+  if (!accountAddress.value) {
+    // Clear all token balances
+    for (const token of configuredTokens) {
+      tokenBalances[token.symbol] = null;
+    }
+    return;
+  }
+
+  try {
+    // Fetch all token balances in parallel using getTokenInfo
+    const results = await Promise.all(
+      configuredTokens.map(async (token) => {
+        const info = await walletClient.getTokenInfo(
+          accountAddress.value as Address,
+          token.address as Address
+        );
+        return { symbol: token.symbol, info };
+      })
+    );
+
+    // Update reactive state
+    for (const { symbol, info } of results) {
+      tokenBalances[symbol] = {
+        balance: info.balance,
+        decimals: info.decimals,
+        formatted: parseFloat(info.formatted).toFixed(Math.min(info.decimals, 6)),
+      };
+    }
+  } catch (error) {
+    logger.error({ error }, "Failed to fetch token balances");
   }
 }
 
@@ -308,6 +393,130 @@ async function handleSendTransaction() {
     await sendSessionTransaction();
   } else {
     await sendDirectTransaction();
+  }
+}
+
+// Generic ERC20 Transfer encoding using viem's erc20Abi
+function encodeErc20Transfer(to: Address, amount: bigint): Hex {
+  return encodeFunctionData({
+    abi: erc20Abi,
+    functionName: "transfer",
+    args: [to, amount],
+  });
+}
+
+// Generic token send - works for any configured ERC20
+async function sendDirectTokenTransaction(tokenConfig: TokenConfig) {
+  const alchemySigner = getAlchemySigner();
+  if (!alchemySigner || !accountAddress.value) {
+    status.value = "Please login and create a wallet first";
+    return null;
+  }
+
+  try {
+    loading.value = true;
+    status.value = `Sending ${tokenConfig.symbol} direct transaction...`;
+
+    const tokenBalance = tokenBalances[tokenConfig.symbol];
+    const decimals = tokenBalance?.decimals ?? tokenConfig.decimals ?? 18;
+    const amountValue = tokenAmounts[tokenConfig.symbol] ?? "0";
+    const amountInSmallestUnit = parseUnits(amountValue, decimals);
+
+    const transferData = encodeErc20Transfer(
+      recipientAddress.value as Address,
+      amountInSmallestUnit
+    );
+
+    const hash = await walletClient.sendDirectTransaction(alchemySigner, {
+      to: tokenConfig.address,
+      value: "0",
+      data: transferData,
+    });
+
+    status.value = `${tokenConfig.symbol} sent!`;
+    logger.info({ txHash: hash, token: tokenConfig.symbol }, "Direct token transaction completed");
+    return hash;
+  } catch (error: any) {
+    logger.error({ error, token: tokenConfig.symbol }, "Direct token transaction error");
+    status.value = `${tokenConfig.symbol} TX Error: ${error.message}`;
+    return null;
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function sendSessionTokenTransaction(tokenConfig: TokenConfig) {
+  if (!isSessionActive.value) {
+    status.value = "Please create a session first";
+    return null;
+  }
+
+  try {
+    loading.value = true;
+    status.value = `Sending ${tokenConfig.symbol} via session key...`;
+
+    const tokenBalance = tokenBalances[tokenConfig.symbol];
+    const decimals = tokenBalance?.decimals ?? tokenConfig.decimals ?? 18;
+    const amountValue = tokenAmounts[tokenConfig.symbol] ?? "0";
+    const amountInSmallestUnit = parseUnits(amountValue, decimals);
+
+    const transferData = encodeErc20Transfer(
+      recipientAddress.value as Address,
+      amountInSmallestUnit
+    );
+
+    const result = await sendTransactionMutation({
+      to: tokenConfig.address,
+      value: "0",
+      data: transferData,
+    });
+
+    status.value = `${tokenConfig.symbol} sent!`;
+    logger.info({ txHash: result.transactionHash, token: tokenConfig.symbol }, "Session token transaction completed");
+    return result.transactionHash;
+  } catch (error: any) {
+    logger.error({ error, token: tokenConfig.symbol }, "Session token transaction error");
+    status.value = `${tokenConfig.symbol} TX Error: ${error.message}`;
+    return null;
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function refreshBalances() {
+  isRefreshing.value = true;
+  try {
+    await Promise.all([fetchAccountBalance(), fetchTokenBalances()]);
+  } finally {
+    isRefreshing.value = false;
+  }
+}
+
+async function handleUnifiedSend() {
+  let hash: string | null = null;
+
+  if (selectedToken.value === nativeToken.symbol) {
+    // Native token (ETH)
+    await handleSendTransaction();
+    hash = txHash.value;
+  } else {
+    // ERC20 token
+    const tokenConfig = currentTokenConfig.value;
+    if (!tokenConfig) {
+      status.value = "Token configuration not found";
+      return;
+    }
+
+    if (txMethod.value === "session") {
+      hash = await sendSessionTokenTransaction(tokenConfig);
+    } else {
+      hash = await sendDirectTokenTransaction(tokenConfig);
+    }
+  }
+
+  if (hash) {
+    lastTxHash.value = hash;
+    await refreshBalances();
   }
 }
 
@@ -482,44 +691,87 @@ onUnmounted(() => {
       </p>
     </article>
 
+    <!-- Balances Card -->
+    <article v-if="accountAddress">
+      <header>
+        <h3>Balances</h3>
+        <button class="outline secondary" style="padding: 0.25rem 0.5rem; margin: 0" @click="refreshBalances" :aria-busy="isRefreshing">↻</button>
+      </header>
+      <div class="grid">
+        <!-- Native Token -->
+        <div>
+          <small>{{ nativeToken.symbol }}</small>
+          <div><strong>{{ accountBalance ?? '—' }}</strong></div>
+        </div>
+        <!-- ERC20 Tokens -->
+        <div v-for="token in configuredTokens" :key="token.symbol">
+          <small>{{ token.symbol }}</small>
+          <div><strong>{{ tokenBalances[token.symbol]?.formatted ?? '—' }}</strong></div>
+        </div>
+      </div>
+    </article>
+
+    <!-- Unified Send Transaction -->
     <article>
       <h3>3. Send Transaction</h3>
-      <label
-        >To Address
+
+      <div class="grid">
+        <label>
+          Token
+          <select v-model="selectedToken">
+            <option :value="nativeToken.symbol">{{ nativeToken.symbol }}</option>
+            <option v-for="token in configuredTokens" :key="token.symbol" :value="token.symbol">
+              {{ token.symbol }}
+            </option>
+          </select>
+        </label>
+        <label>
+          Signing Method
+          <select v-model="txMethod" :disabled="!isSessionActive && txMethod === 'session'">
+            <option value="session" :disabled="!isSessionActive">Session Key</option>
+            <option value="direct">Direct (MPC)</option>
+          </select>
+        </label>
+      </div>
+
+      <label>
+        Recipient
         <input v-model="recipientAddress" type="text" placeholder="0x..." />
       </label>
-      <label
-        >Amount (ETH)
-        <input v-model="amount" type="text" placeholder="0.00001" />
-        <small v-if="accountBalance !== null" style="cursor: pointer" @click="amount = accountBalance"
-          >Balance: {{ accountBalance }} ETH</small
+
+      <label>
+        Amount
+        <input
+          v-model="unifiedAmount"
+          type="text"
+          :placeholder="selectedToken === nativeToken.symbol ? '0.00001' : '1'"
+        />
+        <small
+          v-if="currentTokenBalance"
+          style="cursor: pointer; color: var(--pico-primary)"
+          @click="unifiedAmount = currentTokenBalance.formatted"
         >
+          Available: {{ currentTokenBalance.formatted }} {{ selectedToken }}
+        </small>
       </label>
-      <fieldset>
-        <legend>Signing Method</legend>
-        <label>
-          <input
-            type="radio"
-            name="txMethod"
-            value="session"
-            v-model="txMethod"
-            :disabled="!isSessionActive"
-          />
-          Session Key
-        </label>
-        <label>
-          <input type="radio" name="txMethod" value="direct" v-model="txMethod" />
-          Direct (Main Signer)
-        </label>
-      </fieldset>
+
       <button
-        @click="handleSendTransaction"
+        @click="handleUnifiedSend"
         :disabled="loading || !accountAddress || (txMethod === 'session' && !isSessionActive)"
+        :aria-busy="loading"
       >
-        Send
+        Send {{ selectedToken }}
       </button>
-      <p v-if="txHash">
-        <a :href="`https://sepolia.etherscan.io/tx/${txHash}`" target="_blank">{{ txHash }}</a>
+
+      <p v-if="lastTxHash">
+        <small>
+          <a :href="`https://sepolia.etherscan.io/tx/${lastTxHash}`" target="_blank" style="font-family: monospace">
+            {{ lastTxHash.slice(0, 10) }}...{{ lastTxHash.slice(-8) }}
+          </a>
+        </small>
+      </p>
+      <p v-if="currentTokenConfig">
+        <small>Contract: <code>{{ currentTokenConfig.address }}</code></small>
       </p>
     </article>
 
@@ -535,6 +787,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* Toast notification - only custom style needed */
 .toast {
   position: fixed;
   bottom: 1rem;
@@ -546,5 +799,16 @@ onUnmounted(() => {
   cursor: pointer;
   max-width: 400px;
   z-index: 1000;
+}
+
+/* Flex header for balance card */
+article > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+article > header h3 {
+  margin: 0;
 }
 </style>

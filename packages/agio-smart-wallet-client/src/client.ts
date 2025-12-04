@@ -1,5 +1,5 @@
 import type { Chain, Hex, Address } from "viem";
-import { parseEther, toHex, getAddress } from "viem";
+import { parseEther, toHex, getAddress, erc20Abi, createPublicClient, http, formatUnits } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createSmartWalletClient } from "@account-kit/wallet-client";
 import { alchemy } from "@account-kit/infra";
@@ -226,5 +226,85 @@ export class SmartWalletClient {
 
     const data = await response.json();
     return data.result ? BigInt(data.result) : 0n;
+  }
+
+  /**
+   * Get a viem public client for read operations
+   */
+  private getPublicClient() {
+    return createPublicClient({
+      chain: this.config.chain,
+      transport: http(
+        `https://eth-${this.config.chain.name.toLowerCase()}.g.alchemy.com/v2/${this.config.alchemyApiKey}`
+      ),
+    });
+  }
+
+  /**
+   * Get ERC20 token balance for an account
+   */
+  async getTokenBalance(accountAddress: Address, tokenAddress: Address): Promise<bigint> {
+    const client = this.getPublicClient();
+    return client.readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [accountAddress],
+    });
+  }
+
+  /**
+   * Get ERC20 token decimals
+   */
+  async getTokenDecimals(tokenAddress: Address): Promise<number> {
+    const client = this.getPublicClient();
+    try {
+      return await client.readContract({
+        address: tokenAddress,
+        abi: erc20Abi,
+        functionName: "decimals",
+      });
+    } catch {
+      return 18; // Default to 18 if not available
+    }
+  }
+
+  /**
+   * Get ERC20 token symbol
+   */
+  async getTokenSymbol(tokenAddress: Address): Promise<string> {
+    const client = this.getPublicClient();
+    try {
+      return await client.readContract({
+        address: tokenAddress,
+        abi: erc20Abi,
+        functionName: "symbol",
+      });
+    } catch {
+      return "???";
+    }
+  }
+
+  /**
+   * Get full token info (symbol, decimals, balance) in one call
+   */
+  async getTokenInfo(
+    accountAddress: Address,
+    tokenAddress: Address
+  ): Promise<{ symbol: string; decimals: number; balance: bigint; formatted: string }> {
+    const client = this.getPublicClient();
+
+    const [symbol, decimals, balance] = await Promise.all([
+      client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "symbol" }).catch(() => "???"),
+      client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "decimals" }).catch(() => 18),
+      client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "balanceOf", args: [accountAddress] }).catch(() => 0n),
+    ]);
+
+    return {
+      symbol,
+      decimals,
+      balance,
+      formatted: formatUnits(balance, decimals),
+    };
   }
 }

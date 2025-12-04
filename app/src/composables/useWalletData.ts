@@ -20,6 +20,7 @@ export function useWalletData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
 
   return {
     wallet: computed(() => state.value.data),
+    walletStatus: computed(() => state.value.status),
     saveWallet,
     refetchWallet: refetch,
   };
