@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryCache } from "@pinia/colada";
-import { computed, toValue, type MaybeRefOrGetter } from "vue";
+import { computed, toValue, type MaybeRefOrGetter, type Ref } from "vue";
 import { isSessionActive } from "agio-smart-wallet-core";
 import {
   getSession,
@@ -9,12 +9,17 @@ import {
 } from "../api/session";
 
 // isAuthenticated controls when the query runs (waits for auth)
-export function useSessionData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
+// walletIndex is reactive to automatically refetch when wallet changes
+export function useSessionData(
+  isAuthenticated?: MaybeRefOrGetter<boolean>,
+  walletIndex?: Ref<number>
+) {
   const queryCache = useQueryCache();
+  const getWalletIndex = () => walletIndex?.value ?? 0;
 
   const { state, refetch } = useQuery({
-    key: () => ["session"],
-    query: () => getSession(),
+    key: () => ["session", getWalletIndex()],
+    query: () => getSession(getWalletIndex() > 0 ? getWalletIndex() : undefined),
     staleTime: 60_000,
     enabled: () => (isAuthenticated !== undefined ? !!toValue(isAuthenticated) : true),
   });
@@ -29,17 +34,19 @@ export function useSessionData(isAuthenticated?: MaybeRefOrGetter<boolean>) {
       permissionsContext?: string;
       permissions: any[];
       expiresAt: number;
+      walletIndex?: number;
     }) => createSessionApi(params),
     onSuccess: () => queryCache.invalidateQueries({ key: ["session"] }),
   });
 
   const { mutateAsync: revokeSession } = useMutation({
-    mutation: () => revokeSessionApi(),
+    mutation: (params?: { walletIndex?: number }) => revokeSessionApi(params?.walletIndex),
     onSuccess: () => queryCache.invalidateQueries({ key: ["session"] }),
   });
 
   const { mutateAsync: sendTransaction } = useMutation({
-    mutation: (params: { to: string; value: string; data?: string }) => sendTransactionApi(params),
+    mutation: (params: { to: string; value: string; data?: string; walletIndex?: number }) =>
+      sendTransactionApi(params),
   });
 
   return {

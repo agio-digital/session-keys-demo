@@ -1,9 +1,12 @@
 import { http } from "../utils/http";
 import type { SessionInfo } from "agio-smart-wallet-core";
 
-export async function getSession(): Promise<SessionInfo | null> {
+export type SessionWithIndex = SessionInfo & { walletIndex: number };
+
+export async function getSession(walletIndex?: number): Promise<SessionWithIndex | null> {
   try {
-    return await http.get<SessionInfo>("/api/session");
+    const params = walletIndex !== undefined ? `?walletIndex=${walletIndex}` : "";
+    return await http.get<SessionWithIndex>(`/api/session${params}`);
   } catch {
     return null;
   }
@@ -18,17 +21,19 @@ export async function createSession(params: {
   permissionsContext?: string;
   permissions: any[];
   expiresAt: number;
+  walletIndex?: number;
 }) {
-  return http.post<{ ok: boolean; sessionId: string; accountAddress: string }>(
+  return http.post<{ ok: boolean; sessionId: string; accountAddress: string; walletIndex: number }>(
     "/api/session",
     params
   );
 }
 
-export async function revokeSession() {
-  return http.delete<{ ok: boolean; message: string }>("/api/session");
+export async function revokeSession(walletIndex?: number) {
+  const params = walletIndex !== undefined ? `?walletIndex=${walletIndex}` : "";
+  return http.delete<{ ok: boolean; message: string; walletIndex: number }>(`/api/session${params}`);
 }
 
-export async function sendTransaction(params: { to: string; value: string; data?: string }) {
-  return http.post<{ success: boolean; transactionHash: string }>("/api/transaction", params);
+export async function sendTransaction(params: { to: string; value: string; data?: string; walletIndex?: number }) {
+  return http.post<{ success: boolean; transactionHash: string; walletIndex: number }>("/api/transaction", params);
 }

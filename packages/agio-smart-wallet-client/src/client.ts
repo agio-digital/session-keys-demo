@@ -24,11 +24,11 @@ export interface SmartWalletClientConfig {
 
 export interface CreateWalletOptions {
   /**
-   * Optional account identifier for multi-account support.
-   * If specified, creates a new account even if one already exists for this signer.
-   * Use different IDs to create multiple accounts per signer.
+   * Wallet index for deterministic salt generation.
+   * Index 0 = first/default wallet, index 1+ = additional wallets with different addresses.
+   * Different indices create different smart wallet addresses from the same signer.
    */
-  accountId?: string;
+  walletIndex?: number;
 }
 
 export interface CreateSessionResult {
@@ -70,9 +70,15 @@ export class SmartWalletClient {
       policyId: this.config.policyId,
     });
 
-    const account = await client.requestAccount(
-      options?.accountId ? { id: options.accountId } : undefined
-    );
+    // For additional wallets (index > 0), use creationHint with salt to get different addresses
+    const creationHint = options?.walletIndex && options.walletIndex > 0
+      ? {
+          createAdditional: true as const,
+          salt: `0x${options.walletIndex.toString(16).padStart(64, "0")}` as Hex,
+        }
+      : undefined;
+
+    const account = await client.requestAccount(creationHint ? { creationHint } : undefined);
     return getAddress(account.address);
   }
 
@@ -105,10 +111,15 @@ export class SmartWalletClient {
       policyId: this.config.policyId,
     });
 
-    // Request account to associate signer (with optional accountId for multi-account)
-    await client.requestAccount(
-      options?.accountId ? { id: options.accountId } : undefined
-    );
+    // For additional wallets (index > 0), use creationHint with salt to get the correct account
+    const creationHint = options?.walletIndex && options.walletIndex > 0
+      ? {
+          createAdditional: true as const,
+          salt: `0x${options.walletIndex.toString(16).padStart(64, "0")}` as Hex,
+        }
+      : undefined;
+
+    await client.requestAccount(creationHint ? { creationHint } : undefined);
 
     // Grant permissions (user signs authorization)
     const permissions = options?.permissions || [{ type: "root" }];

@@ -15,10 +15,17 @@ const routes = [
   },
   {
     path: "/wallet",
+    redirect: "/wallet/0",
+  },
+  {
+    path: "/wallet/:id",
     name: "wallet",
     component: () => import("../views/Wallet.vue"),
     beforeEnter: authGuard,
     meta: { requiresAlchemy: true },
+    props: (route: { params: { id: string } }) => ({
+      walletId: parseInt(route.params.id, 10) || 0,
+    }),
   },
 ];
 

@@ -13,6 +13,11 @@ import { useAlchemySigner } from "../composables/useAlchemySigner";
 import router from "@/router";
 import { delay } from "@/utils/delay";
 
+// Props from router
+const props = defineProps<{
+  walletId: number;
+}>();
+
 const { logout: auth0Logout, isLoading, isAuthenticated } = useAuth0();
 const {
   isAuthenticated: isAlchemyAuthenticated,
@@ -77,7 +82,32 @@ onMounted(async () => {
 });
 
 // Pinia Colada auto-fetches and caches (userId determined from JWT on server)
-const { wallet, walletStatus, saveWallet: saveWalletMutation } = useWalletData(isAlchemyAuthenticated);
+const {
+  wallet,
+  walletStatus,
+  wallets,
+  selectedWalletIndex,
+  selectWallet,
+  saveWallet: saveWalletMutation,
+  refetchWallets,
+} = useWalletData(isAlchemyAuthenticated);
+
+// Sync route param with selected wallet index
+watch(
+  () => props.walletId,
+  (newId) => {
+    if (newId !== selectedWalletIndex.value) {
+      selectWallet(newId);
+    }
+  },
+  { immediate: true }
+);
+
+// Navigate when wallet selection changes (from dropdown)
+function navigateToWallet(index: number) {
+  router.push(`/wallet/${index}`);
+}
+
 const {
   session,
   sessionStatus,
@@ -85,7 +115,7 @@ const {
   createSession: createSessionMutation,
   revokeSession: revokeSessionMutation,
   sendTransaction: sendTransactionMutation,
-} = useSessionData(isAlchemyAuthenticated);
+} = useSessionData(isAlchemyAuthenticated, selectedWalletIndex);
 
 // Local UI state
 const loading = ref(false);
@@ -152,8 +182,8 @@ const hasWallet = computed(() => !!wallet.value);
 // Validate data consistency: if session exists but no wallet, revoke the session
 // Only run after both queries have completed to avoid race conditions
 watch(
-  [session, wallet, walletStatus, sessionStatus, mounting],
-  ([sessionData, walletData, wStatus, sStatus, isMounting]) => {
+  [session, wallet, walletStatus, sessionStatus, mounting, selectedWalletIndex],
+  ([sessionData, walletData, wStatus, sStatus, isMounting, walletIdx]) => {
     // Don't check during initial mount
     if (isMounting) return;
 
@@ -161,8 +191,8 @@ watch(
     if (wStatus === "pending" || sStatus === "pending") return;
 
     if (sessionData && !walletData) {
-      logger.warn("Inconsistent state: session exists but no wallet found. Revoking session.");
-      revokeSessionMutation();
+      logger.warn({ walletIndex: walletIdx }, "Inconsistent state: session exists but no wallet found. Revoking session.");
+      revokeSessionMutation({ walletIndex: walletIdx > 0 ? walletIdx : undefined });
       status.value = "Session revoked: wallet data missing. Please create a new wallet.";
     }
   }
@@ -189,8 +219,8 @@ async function connectAlchemyWallet() {
   }
 }
 
-async function createWallet() {
-  if (hasWallet.value) {
+async function createWallet(isAdditional = false) {
+  if (hasWallet.value && !isAdditional) {
     status.value = "Wallet already exists";
     return;
   }
@@ -203,16 +233,29 @@ async function createWallet() {
 
   try {
     loading.value = true;
-    status.value = "Creating wallet via Alchemy Wallet API...";
 
-    const address = await walletClient.createWallet(alchemySigner);
+    // For additional wallets, use next index
+    const nextIndex = isAdditional ? wallets.value.length : 0;
 
-    // Save wallet data to server (required for session key transactions)
+    status.value = isAdditional
+      ? `Creating additional wallet #${nextIndex}...`
+      : "Creating wallet via Alchemy Wallet API...";
+
+    logger.info({ walletIndex: nextIndex }, "Creating wallet");
+
+    // Pass walletIndex to Alchemy SDK - walletIndex > 0 uses creationHint with salt for different address
+    const address = await walletClient.createWallet(alchemySigner, { walletIndex: nextIndex });
+
+    // Save wallet data to server with walletIndex
     status.value = "Saving wallet to server...";
-    await saveWalletMutation({ accountAddress: address });
+    await saveWalletMutation({ accountAddress: address, walletIndex: nextIndex });
+    await refetchWallets();
 
-    status.value = `Wallet created: ${address}`;
-    logger.info({ accountAddress: address }, "Wallet created and saved to server");
+    // Navigate to the new wallet (this also updates selection via route watcher)
+    router.push(`/wallet/${nextIndex}`);
+
+    status.value = `Wallet ${isAdditional ? `#${nextIndex}` : ""} created: ${address}`;
+    logger.info({ accountAddress: address, walletIndex: nextIndex }, "Wallet created and saved to server");
   } catch (error: any) {
     logger.error({ error }, "Wallet creation error");
     status.value = `Error: ${error.message}`;
@@ -299,16 +342,19 @@ async function createSession() {
     status.value = "Creating session via SDK grantPermissions...";
 
     const durationHours = parseInt(sessionDuration.value);
+    const walletIdx = selectedWalletIndex.value;
+
     const result = await walletClient.createSession(
       alchemySigner,
       accountAddress.value as `0x${string}`,
       {
         expiryHours: durationHours,
         permissions: [{ type: "root" }],
+        walletIndex: walletIdx,  // Pass walletIndex for creationHint with salt
       }
     );
 
-    // Store session data on server
+    // Store session data on server with walletIndex
     await createSessionMutation({
       sessionId: result.sessionId,
       sessionKey: result.sessionKey,
@@ -318,10 +364,11 @@ async function createSession() {
       permissionsContext: result.permissionsContext,
       permissions: result.permissions,
       expiresAt: result.expiresAt,
+      walletIndex: walletIdx,
     });
 
     status.value = `Session created: ${result.sessionId}`;
-    logger.info({ sessionId: result.sessionId }, "Session created");
+    logger.info({ sessionId: result.sessionId, walletIndex: walletIdx }, "Session created");
   } catch (error: any) {
     logger.error({ error }, "Session creation error");
     status.value = `Error: ${error.message}`;
@@ -371,15 +418,17 @@ async function sendSessionTransaction() {
     txHash.value = "";
     status.value = "Sending transaction via session key...";
 
+    const walletIdx = selectedWalletIndex.value;
     const result = await sendTransactionMutation({
       to: recipientAddress.value,
       value: parseEther(amount.value).toString(),
       data: "0x",
+      walletIndex: walletIdx > 0 ? walletIdx : undefined,
     });
 
     txHash.value = result.transactionHash;
     status.value = "Transaction sent!";
-    logger.info({ txHash: txHash.value }, "Session key transaction completed");
+    logger.info({ txHash: txHash.value, walletIndex: walletIdx }, "Session key transaction completed");
   } catch (error: any) {
     logger.error({ error }, "Transaction error");
     status.value = `Error: ${error.message}`;
@@ -465,14 +514,16 @@ async function sendSessionTokenTransaction(tokenConfig: TokenConfig) {
       amountInSmallestUnit
     );
 
+    const walletIdx = selectedWalletIndex.value;
     const result = await sendTransactionMutation({
       to: tokenConfig.address,
       value: "0",
       data: transferData,
+      walletIndex: walletIdx > 0 ? walletIdx : undefined,
     });
 
     status.value = `${tokenConfig.symbol} sent!`;
-    logger.info({ txHash: result.transactionHash, token: tokenConfig.symbol }, "Session token transaction completed");
+    logger.info({ txHash: result.transactionHash, token: tokenConfig.symbol, walletIndex: walletIdx }, "Session token transaction completed");
     return result.transactionHash;
   } catch (error: any) {
     logger.error({ error, token: tokenConfig.symbol }, "Session token transaction error");
@@ -527,11 +578,13 @@ async function revokeSession() {
 
   try {
     loading.value = true;
-    status.value = "Revoking session...";
+    const walletIdx = selectedWalletIndex.value;
+    status.value = `Revoking session for wallet #${walletIdx}...`;
 
-    await revokeSessionMutation();
+    await revokeSessionMutation({ walletIndex: walletIdx > 0 ? walletIdx : undefined });
 
     status.value = "Session revoked";
+    logger.info({ walletIndex: walletIdx }, "Session revoked");
   } catch (error: any) {
     logger.error({ error }, "Revoke error");
     status.value = `Error: ${error.message}`;
@@ -543,10 +596,11 @@ async function revokeSession() {
 async function resetWallet() {
   try {
     loading.value = true;
-    status.value = "Revoking session...";
+    const walletIdx = selectedWalletIndex.value;
+    status.value = `Revoking session for wallet #${walletIdx}...`;
 
     if (session.value) {
-      await revokeSessionMutation();
+      await revokeSessionMutation({ walletIndex: walletIdx > 0 ? walletIdx : undefined });
     }
 
     window.location.reload();
@@ -636,22 +690,45 @@ onUnmounted(() => {
     </nav>
 
     <article>
-      <h3>1. Create Smart Wallet</h3>
-      <div role="group">
-        <button @click="createWallet" :disabled="loading || !!accountAddress">
-          {{ accountAddress ? "Wallet Created" : "Create Wallet" }}
+      <h3>1. Smart Wallet</h3>
+
+      <!-- Wallet Selector (only show if multiple wallets) -->
+      <div v-if="wallets.length > 1" style="margin-bottom: 1rem">
+        <label>
+          Select Wallet
+          <select :value="selectedWalletIndex" @change="(e) => navigateToWallet(Number((e.target as HTMLSelectElement).value))">
+            <option v-for="w in wallets" :key="w.walletIndex" :value="w.walletIndex">
+              Wallet #{{ w.walletIndex }} - {{ w.accountAddress.slice(0, 8) }}...{{ w.accountAddress.slice(-6) }}
+            </option>
+          </select>
+        </label>
+        <button @click="() => createWallet(true)" :disabled="loading" class="outline" style="margin-top: 0.5rem; width: auto; padding: 0.5rem 1rem;">
+          + Add Wallet
+        </button>
+      </div>
+
+      <div v-else role="group">
+        <button @click="() => createWallet(false)" :disabled="loading || hasWallet">
+          {{ hasWallet ? "Wallet Created" : "Create Wallet" }}
+        </button>
+        <button v-if="hasWallet" @click="() => createWallet(true)" :disabled="loading" class="outline">
+          + Add Wallet
         </button>
         <button v-if="hasWallet" @click="resetWallet" :disabled="loading" class="secondary">
           Clear &amp; Revoke
         </button>
       </div>
+
       <p v-if="accountAddress">
-        <small
-          ><strong>Wallet:</strong> <code>{{ accountAddress }}</code>
+        <small>
+          <strong>Wallet #{{ selectedWalletIndex }}:</strong> <code>{{ accountAddress }}</code>
           &nbsp;
           <mark v-if="isAccountDeployed">Deployed</mark>
-          <ins v-else>Counterfactual</ins></small
-        >
+          <ins v-else>Counterfactual</ins>
+        </small>
+      </p>
+      <p v-if="wallets.length > 1">
+        <small>Total wallets: {{ wallets.length }}</small>
       </p>
     </article>
 

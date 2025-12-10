@@ -81,7 +81,7 @@ app.use(express.json());
 
 // Wallet endpoints
 app.post("/api/wallet", requireAuth, async (req: AuthRequest, res) => {
-  const { accountAddress } = req.body;
+  const { accountAddress, walletIndex } = req.body;
   const userId = req.auth!.sub;
 
   if (!accountAddress) {
@@ -89,26 +89,43 @@ app.post("/api/wallet", requireAuth, async (req: AuthRequest, res) => {
   }
 
   try {
-    await walletService.saveWallet(userId, accountAddress);
-    logger.info({ userId, accountAddress }, "✓ Wallet saved");
-    res.json({ ok: true, accountAddress });
+    // If walletIndex not specified, get next available index
+    const index = walletIndex ?? await storage.getNextWalletIndex(userId);
+    await walletService.saveWallet(userId, accountAddress, index > 0 ? index : undefined);
+    logger.info({ userId, accountAddress, walletIndex: index }, "✓ Wallet saved");
+    res.json({ ok: true, accountAddress, walletIndex: index });
   } catch (error: any) {
     logger.error({ error: error.message }, "Failed to save wallet");
     res.status(500).json({ error: error.message });
   }
 });
 
+// Get single wallet by index (backward compat: no index = first wallet)
 app.get("/api/wallet", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
+  const walletIndex = req.query.walletIndex ? parseInt(req.query.walletIndex as string, 10) : undefined;
 
   try {
-    const wallet = await walletService.getWallet(userId);
+    const wallet = await walletService.getWallet(userId, walletIndex);
     if (!wallet) {
       return res.status(404).json({ error: "No wallet found" });
     }
-    res.json(wallet);
+    res.json({ ...wallet, walletIndex: walletIndex ?? 0 });
   } catch (error: any) {
     logger.error({ error: error.message }, "Failed to get wallet");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all wallets for user
+app.get("/api/wallets", requireAuth, async (req: AuthRequest, res) => {
+  const userId = req.auth!.sub;
+
+  try {
+    const wallets = await storage.getWallets(userId);
+    res.json({ wallets });
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Failed to get wallets");
     res.status(500).json({ error: error.message });
   }
 });
@@ -116,7 +133,7 @@ app.get("/api/wallet", requireAuth, async (req: AuthRequest, res) => {
 // Session endpoints
 app.post("/api/session", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
-  const { sessionId, sessionKey, sessionKeyAddress, accountAddress, signature, permissionsContext, permissions, expiresAt } = req.body;
+  const { sessionId, sessionKey, sessionKeyAddress, accountAddress, signature, permissionsContext, permissions, expiresAt, walletIndex } = req.body;
 
   if (!sessionId || !sessionKey || !accountAddress) {
     return res.status(400).json({ error: "Missing required fields" });
@@ -132,10 +149,10 @@ app.post("/api/session", requireAuth, async (req: AuthRequest, res) => {
       permissionsContext,
       permissions,
       expiresAt,
-    });
+    }, walletIndex > 0 ? walletIndex : undefined);
 
-    logger.info({ userId, sessionId, accountAddress }, "✓ Session created");
-    res.json({ ok: true, sessionId, accountAddress });
+    logger.info({ userId, sessionId, accountAddress, walletIndex }, "✓ Session created");
+    res.json({ ok: true, sessionId, accountAddress, walletIndex: walletIndex ?? 0 });
   } catch (error: any) {
     logger.error({ error: error.message }, "Failed to create session");
     res.status(400).json({ error: error.message });
@@ -144,9 +161,10 @@ app.post("/api/session", requireAuth, async (req: AuthRequest, res) => {
 
 app.get("/api/session", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
+  const walletIndex = req.query.walletIndex ? parseInt(req.query.walletIndex as string, 10) : undefined;
 
   try {
-    const session = await walletService.getSession(userId);
+    const session = await walletService.getSession(userId, walletIndex);
     if (!session) {
       return res.status(404).json({ error: "No session found" });
     }
@@ -157,7 +175,7 @@ app.get("/api/session", requireAuth, async (req: AuthRequest, res) => {
       expiresAt: session.expiresAt,
       revoked: session.revoked,
     };
-    res.json(info);
+    res.json({ ...info, walletIndex: walletIndex ?? 0 });
   } catch (error: any) {
     logger.error({ error: error.message }, "Failed to get session");
     res.status(500).json({ error: error.message });
@@ -166,11 +184,12 @@ app.get("/api/session", requireAuth, async (req: AuthRequest, res) => {
 
 app.delete("/api/session", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
+  const walletIndex = req.query.walletIndex ? parseInt(req.query.walletIndex as string, 10) : undefined;
 
   try {
-    await walletService.revokeSession(userId);
-    logger.info({ userId }, "✓ Session revoked");
-    res.json({ ok: true, message: "Session revoked" });
+    await walletService.revokeSession(userId, walletIndex);
+    logger.info({ userId, walletIndex }, "✓ Session revoked");
+    res.json({ ok: true, message: "Session revoked", walletIndex: walletIndex ?? 0 });
   } catch (error: any) {
     logger.error({ error: error.message }, "Failed to revoke session");
     res.status(500).json({ error: error.message });
@@ -180,15 +199,15 @@ app.delete("/api/session", requireAuth, async (req: AuthRequest, res) => {
 // Transaction endpoint
 app.post("/api/transaction", requireAuth, async (req: AuthRequest, res) => {
   const userId = req.auth!.sub;
-  const { to, value, data } = req.body;
+  const { to, value, data, walletIndex } = req.body;
 
   try {
-    logger.info({ userId, to, value }, "Sending transaction");
+    logger.info({ userId, to, value, walletIndex }, "Sending transaction");
 
-    const result = await walletService.sendTransaction(userId, { to, value, data });
+    const result = await walletService.sendTransaction(userId, { to, value, data }, walletIndex > 0 ? walletIndex : undefined);
 
-    logger.info({ txHash: result.transactionHash }, "✓ Transaction sent");
-    res.json(result);
+    logger.info({ txHash: result.transactionHash, walletIndex }, "✓ Transaction sent");
+    res.json({ ...result, walletIndex: walletIndex ?? 0 });
   } catch (error: any) {
     logger.error({ error: error.message }, "Transaction failed");
     res.status(500).json({ error: "Transaction failed", message: error.message });

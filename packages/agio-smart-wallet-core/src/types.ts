@@ -103,10 +103,11 @@ export interface CreateSessionOptions {
   /** Permissions for the session key */
   permissions?: Permission[];
   /**
-   * Optional account identifier for multi-account support.
-   * Must match the accountId used when creating the wallet.
+   * Wallet index for deterministic salt generation.
+   * Index 0 = first/default wallet, index 1+ = additional wallets with different addresses.
+   * Must match the walletIndex used when creating the wallet.
    */
-  accountId?: string;
+  walletIndex?: number;
 }
 
 /**

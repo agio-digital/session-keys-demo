@@ -45,32 +45,29 @@ export class SmartWalletService {
    *
    * @param userId - User identifier (e.g., Auth0 sub claim)
    * @param accountAddress - Smart wallet address
-   * @param accountId - Optional account identifier for multi-account support
+   * @param walletIndex - Optional wallet index for multi-wallet support (0 = first wallet)
    */
   async saveWallet(
     userId: string,
     accountAddress: Address,
-    accountId?: string
+    walletIndex?: number
   ): Promise<void> {
     const wallet: WalletData = {
       accountAddress: getAddress(accountAddress),
-      accountId,
+      accountId: walletIndex !== undefined && walletIndex > 0 ? String(walletIndex) : undefined,
       createdAt: Date.now(),
     };
-    // Use composite key for multi-account support
-    const storageKey = accountId ? `${userId}:${accountId}` : userId;
-    await this.config.walletStorage.saveWallet(storageKey, wallet);
+    await this.config.walletStorage.saveWallet(userId, wallet, walletIndex);
   }
 
   /**
    * Get wallet for a user
    *
    * @param userId - User identifier
-   * @param accountId - Optional account identifier for multi-account support
+   * @param walletIndex - Optional wallet index for multi-wallet support
    */
-  async getWallet(userId: string, accountId?: string): Promise<WalletData | null> {
-    const storageKey = accountId ? `${userId}:${accountId}` : userId;
-    return this.config.walletStorage.getWallet(storageKey);
+  async getWallet(userId: string, walletIndex?: number): Promise<WalletData | null> {
+    return this.config.walletStorage.getWallet(userId, walletIndex);
   }
 
   // ==================== Session Operations ====================
@@ -78,10 +75,15 @@ export class SmartWalletService {
   /**
    * Store a session key for a user.
    * Called after client-side grantPermissions().
+   *
+   * @param userId - User identifier
+   * @param session - Session data (without revoked/createdAt)
+   * @param walletIndex - Optional wallet index for multi-wallet support
    */
   async storeSession(
     userId: string,
-    session: Omit<SessionData, "revoked" | "createdAt">
+    session: Omit<SessionData, "revoked" | "createdAt">,
+    walletIndex?: number
   ): Promise<void> {
     // Verify session key address matches derived address
     const derivedAddress = privateKeyToAccount(session.sessionKey).address;
@@ -97,29 +99,38 @@ export class SmartWalletService {
       createdAt: Date.now(),
     };
 
-    await this.config.sessionStorage.saveSession(userId, fullSession);
+    await this.config.sessionStorage.saveSession(userId, fullSession, walletIndex);
   }
 
   /**
    * Get session for a user
+   *
+   * @param userId - User identifier
+   * @param walletIndex - Optional wallet index for multi-wallet support
    */
-  async getSession(userId: string, sessionId?: string): Promise<SessionData | null> {
-    return this.config.sessionStorage.getSession(userId, sessionId);
+  async getSession(userId: string, walletIndex?: number): Promise<SessionData | null> {
+    return this.config.sessionStorage.getSession(userId, walletIndex);
   }
 
   /**
    * Validate a session
+   *
+   * @param userId - User identifier
+   * @param walletIndex - Optional wallet index for multi-wallet support
    */
-  async validateUserSession(userId: string, sessionId?: string): Promise<SessionValidation> {
-    const session = await this.getSession(userId, sessionId);
+  async validateUserSession(userId: string, walletIndex?: number): Promise<SessionValidation> {
+    const session = await this.getSession(userId, walletIndex);
     return validateSession(session);
   }
 
   /**
    * Revoke a session
+   *
+   * @param userId - User identifier
+   * @param walletIndex - Optional wallet index for multi-wallet support
    */
-  async revokeSession(userId: string, sessionId?: string): Promise<void> {
-    await this.config.sessionStorage.revokeSession(userId, sessionId);
+  async revokeSession(userId: string, walletIndex?: number): Promise<void> {
+    await this.config.sessionStorage.revokeSession(userId, walletIndex);
   }
 
   // ==================== Transaction Operations ====================
@@ -127,14 +138,18 @@ export class SmartWalletService {
   /**
    * Send a transaction using the stored session key.
    * This is the main method for delegated transaction signing.
+   *
+   * @param userId - User identifier
+   * @param tx - Transaction request
+   * @param walletIndex - Optional wallet index for multi-wallet support
    */
   async sendTransaction(
     userId: string,
     tx: TransactionRequest,
-    sessionId?: string
+    walletIndex?: number
   ): Promise<TransactionResult> {
     // Get and validate session
-    const session = await this.getSession(userId, sessionId);
+    const session = await this.getSession(userId, walletIndex);
     const validation = validateSession(session);
 
     if (!validation.valid || !session) {
